@@ -1,5 +1,5 @@
 {
-  "version": "2026.07.23-v",
-  "note": "Bản khởi đầu: có tính năng tự cập nhật qua GitHub.",
+  "version": "2026.07.23-w",
+  "note": "Avatar: khi tên kênh không ra ảnh thì tự tải 1 ảnh HD ngẫu nhiên.",
   "files": ["auto_login_tool.py", "kiot_login_tool.py"]
 }

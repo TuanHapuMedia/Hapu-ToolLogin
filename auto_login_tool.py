@@ -5927,13 +5927,48 @@ async def _google_image_urls(page, query: str) -> list:
     return out
 
 
+async def _random_hd_download(page, save_path: str, log_fn=print) -> bool:
+    """DỰ PHÒNG: tải 1 ảnh HD NGẪU NHIÊN từ nguồn ổn định (không cần key) khi search
+    tên kênh không ra ảnh. Trả True nếu tải được ảnh hợp lệ."""
+    import random as _rnd
+    _seed = _rnd.randint(1, 9_999_999)
+    # nhiều nguồn ảnh ngẫu nhiên HD ~1200px (thử lần lượt cho tới khi được)
+    urls = [
+        f"https://picsum.photos/seed/{_seed}/1200/1200",
+        f"https://picsum.photos/1200/1200?random={_seed}",
+        f"https://loremflickr.com/1200/1200?lock={_seed}",
+        f"https://picsum.photos/seed/{_seed + 1}/1080/1080",
+    ]
+    for u in urls:
+        try:
+            resp = await page.context.request.get(u, timeout=25000)
+            if not resp.ok:
+                continue
+            data = await resp.body()
+            if not _is_real_image(data):
+                continue
+            w, h = _img_dims(data)
+            if w and min(w, h) < 400:   # bỏ ảnh nhỏ
+                continue
+            with open(save_path, "wb") as f:
+                f.write(data)
+            _d = f"{w}x{h}" if w else "?"
+            log_fn(f"  [AVATAR] ✓ Ảnh HD ngẫu nhiên (tên kênh không ra ảnh) {len(data)//1024} KB ({_d}).")
+            return True
+        except Exception:
+            continue
+    log_fn("  [AVATAR] ⚠ Cả nguồn ảnh ngẫu nhiên cũng không tải được (mạng?).")
+    return False
+
+
 async def _google_image_download(page, query: str, save_path: str, log_fn=print) -> bool:
     """Tải 1 ảnh LỚN (full HD) liên quan tới `query` về save_path.
-    Ưu tiên BING Images (lấy URL ảnh gốc dễ & ổn định), dự phòng Google.
+    Ưu tiên BING Images (lấy URL ảnh gốc dễ & ổn định), dự phòng Google, cuối cùng dự phòng
+    ẢNH HD NGẪU NHIÊN khi tên kênh không ra ảnh nào.
     Có kiểm tra magic-number để không lưu nhầm HTML. Trả True nếu tải được ảnh hợp lệ."""
     import random as _rnd
     if not query:
-        return False
+        return await _random_hd_download(page, save_path, log_fn)
     pool = []
     try:
         pool = await _bing_image_urls(page, query)
@@ -5949,8 +5984,8 @@ async def _google_image_download(page, query: str, save_path: str, log_fn=print)
         except Exception:
             pool = []
     if not pool:
-        log_fn("  [AVATAR] ⚠ Không lấy được URL ảnh (Bing + Google đều trống).")
-        return False
+        log_fn("  [AVATAR] ⚠ Tên kênh không ra ảnh (Bing+Google trống) → dùng ảnh HD ngẫu nhiên.")
+        return await _random_hd_download(page, save_path, log_fn)
     _rnd.shuffle(pool)
     # Tải nhiều ứng viên, ĐO kích thước, CHỌN ẢNH TO NHẤT (nét nhất) — bỏ ảnh nhỏ/mờ.
     # Nếu gặp ảnh HD rõ (cạnh lớn ≥ 1280) thì lấy luôn cho nhanh.
@@ -5989,8 +6024,8 @@ async def _google_image_download(page, query: str, save_path: str, log_fn=print)
         _d = f"{_best[1]}x{_best[2]}" if _best[1] else "?"
         log_fn(f"  [AVATAR] ✓ Chọn ảnh to nhất tìm được ({_d}, {len(_best[0])//1024} KB).")
         return True
-    log_fn("  [AVATAR] ⚠ Tải thử nhiều ảnh nhưng không ảnh nào hợp lệ.")
-    return False
+    log_fn("  [AVATAR] ⚠ Ảnh theo tên kênh không hợp lệ → dùng ảnh HD ngẫu nhiên.")
+    return await _random_hd_download(page, save_path, log_fn)
 
 
 async def do_change_avatar(ws_url: str, email: str = "", data_dir: str = "",
