@@ -1,0 +1,5 @@
+{
+  "version": "2026.07.23-v",
+  "note": "Bản khởi đầu: có tính năng tự cập nhật qua GitHub.",
+  "files": ["auto_login_tool.py", "kiot_login_tool.py"]
+}
