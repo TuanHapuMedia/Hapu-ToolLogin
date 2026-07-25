@@ -4272,6 +4272,204 @@ async def _list_channel_ids(page, log_fn=None) -> list:
     return result
 
 
+async def do_accept_brand_invite(ws_url: str, email: str = "", password: str = "",
+                                 totp_secret: str = "",
+                                 log_fn=print) -> tuple[bool, str, str]:
+    """CHẤP NHẬN QUẢN TRỊ: vào Brand Accounts → 'Lời mời đang chờ' → từng lời mời → 'CHẤP NHẬN'.
+    CHẤP NHẬN TẤT CẢ lời mời đang chờ. Không có lời mời → vẫn coi là THÀNH CÔNG (ghi chú rõ).
+    ⚙ Các mốc nhận diện ĐÃ KIỂM CHỨNG TRÊN TRANG THẬT (không phụ thuộc ngôn ngữ):
+        • Trang danh sách lời mời : URL  …/brandaccounts?si=1
+        • Mỗi lời mời             : thẻ <a> có href kết thúc bằng '/accept'
+        • Nút chấp nhận           : div[jsname="no16zc"]  (dự phòng: chữ Accept/Chấp nhận/…)
+        • Chấp nhận XONG          : URL đổi từ '…/accept' → '…/view'
+    Trả (success, code, message)."""
+    async with async_playwright() as p:
+        log_fn("  [CNQT] Kết nối browser…")
+        browser = await p.chromium.connect_over_cdp(ws_url)
+        ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+        try:
+            await ctx.add_cookies([
+                {"name": "PREF", "value": "hl=en&gl=US", "domain": ".google.com", "path": "/"},
+            ])
+        except Exception:
+            pass
+        page = await ctx.new_page()
+
+        async def _cant_verify() -> bool:
+            try:
+                _t = (await page.evaluate("() => document.body.innerText") or "").lower()
+                return ("couldn't verify" in _t or "couldn`t verify" in _t
+                        or "không thể xác minh" in _t or "cannot verify" in _t)
+            except Exception:
+                return False
+
+        async def _reauth() -> bool:
+            """Google hỏi lại mật khẩu → nhập pass, rồi 2FA nếu cần."""
+            for _ in range(6):
+                if "accounts.google.com" not in (page.url or ""):
+                    return True
+                if await _cant_verify():
+                    return False
+                try:
+                    _has_pw = await page.locator('input[type="password"]').count() > 0
+                except Exception:
+                    _has_pw = False
+                if _has_pw and password:
+                    log_fn("  [CNQT] Nhập lại mật khẩu…")
+                    await _reauth_if_needed(page, password, log_fn)
+                    await page.wait_for_timeout(2500)
+                    continue
+                if totp_secret:
+                    try:
+                        if await _try_totp(page, totp_secret, log_fn):
+                            await page.wait_for_timeout(2500)
+                            continue
+                    except Exception:
+                        pass
+                await page.wait_for_timeout(1500)
+            return "accounts.google.com" not in (page.url or "")
+
+        async def _invite_links() -> list:
+            """Danh sách href các lời mời đang chờ (href kết thúc '/accept')."""
+            try:
+                return await page.evaluate(r"""() => {
+                    const out = [];
+                    for (const a of document.querySelectorAll('a[href]')) {
+                        const h = a.getAttribute('href') || '';
+                        const p = h.split('?')[0].split('#')[0];
+                        if (/\/accept\/?$/.test(p) && out.indexOf(h) < 0) out.push(h);
+                    }
+                    return out;
+                }""") or []
+            except Exception:
+                return []
+
+        async def _click_accept() -> bool:
+            """Bấm nút CHẤP NHẬN trên trang /accept (jsname ổn định + dự phòng theo chữ)."""
+            try:
+                return await page.evaluate(r"""() => {
+                    const vis = e => e && e.offsetParent !== null;
+                    // 1) định danh ổn định (đã kiểm chứng)
+                    let e = document.querySelector('div[jsname="no16zc"]');
+                    if (vis(e)) { try { e.click(); return true; } catch (x) {} }
+                    // 2) dự phòng: theo chữ nhiều ngôn ngữ
+                    const W = ['accept','chấp nhận','chap nhan','ยอมรับ','수락','接受','承諾',
+                               'aceptar','accepter','akzeptieren','aceitar'];
+                    for (const x of document.querySelectorAll('div[jsname], button, [role="button"]')) {
+                        if (!vis(x)) continue;
+                        const t = (x.innerText || '').trim().toLowerCase();
+                        if (W.indexOf(t) < 0) continue;
+                        const r = x.getBoundingClientRect();
+                        if (r.width < 40 || r.height < 20) continue;
+                        try { x.click(); return true; } catch (err) {}
+                    }
+                    return false;
+                }""")
+            except Exception:
+                return False
+
+        # ── B1: Mở THẲNG trang danh sách lời mời (…/brandaccounts?si=1) ──
+        log_fn("  [CNQT] Mở trang Lời mời đang chờ…")
+        try:
+            await page.goto("https://myaccount.google.com/brandaccounts?si=1&hl=en",
+                            wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(3000)
+        except Exception:
+            pass
+        if "accounts.google.com" in (page.url or ""):
+            if not await _reauth():
+                if await _cant_verify():
+                    return False, "2FA7D", "2FA 7 ngày (Google chặn: We couldn't verify it's you)"
+                return False, "", "Không qua được xác minh khi mở trang lời mời"
+            await page.wait_for_timeout(2000)
+
+        _links = await _invite_links()
+        if not _links:
+            # thử lại qua trang gốc + bấm mục 'Lời mời' (phòng khi ?si=1 không ăn)
+            try:
+                await page.goto("https://myaccount.google.com/brandaccounts?pli=1&hl=en",
+                                wait_until="domcontentloaded", timeout=45000)
+                await page.wait_for_timeout(2500)
+            except Exception:
+                pass
+            try:
+                # mục 'Lời mời' = link có path kết thúc bằng 'brandaccounts' (khác
+                # notificationpreferences và /view) — chỉ BẤM ĐƯỢC khi CÓ lời mời.
+                _ok = await page.evaluate(r"""() => {
+                    for (const a of document.querySelectorAll('a[href]')) {
+                        if (a.offsetParent === null) continue;
+                        const p = (a.getAttribute('href') || '').split('?')[0].split('#')[0];
+                        if (/(^|\/)brandaccounts\/?$/.test(p)) { a.click(); return true; }
+                    }
+                    return false;
+                }""")
+                if _ok:
+                    await page.wait_for_timeout(3000)
+            except Exception:
+                pass
+            _links = await _invite_links()
+
+        if not _links:
+            log_fn("  [CNQT] ⓘ Không có lời mời nào đang chờ.")
+            return True, "", "Chấp nhận QT: KHÔNG có lời mời nào đang chờ (có thể đã nhận trước đó)"
+
+        log_fn(f"  [CNQT] Có {len(_links)} lời mời đang chờ → chấp nhận tất cả…")
+        _done, _fail = 0, []
+        for _i in range(len(_links) + 2):        # +2 vòng dự phòng, luôn lấy lại danh sách
+            _links = await _invite_links()
+            if not _links:
+                break
+            _href = _links[0]
+            _url = _href if _href.startswith("http") else \
+                ("https://myaccount.google.com/" + _href.lstrip("/"))
+            try:
+                await page.goto(_url, wait_until="domcontentloaded", timeout=45000)
+                await page.wait_for_timeout(2500)
+            except Exception:
+                pass
+            if "accounts.google.com" in (page.url or ""):
+                if not await _reauth():
+                    if await _cant_verify():
+                        return False, "2FA7D", "2FA 7 ngày (Google chặn xác minh)"
+                    _fail.append("không qua xác minh")
+                    break
+                await page.wait_for_timeout(2000)
+            # bấm CHẤP NHẬN (thử tối đa 4 lần)
+            _ok = False
+            for _t in range(4):
+                if await _click_accept():
+                    await page.wait_for_timeout(2500)
+                    # XONG khi URL đổi từ '/accept' → '/view'
+                    if "/accept" not in (page.url or ""):
+                        _ok = True
+                        break
+                await page.wait_for_timeout(1200)
+            if _ok:
+                _done += 1
+                log_fn(f"  [CNQT] ✓ Đã chấp nhận lời mời #{_done}")
+            else:
+                _fail.append("không bấm được nút Chấp nhận")
+                try:
+                    await page.screenshot(path=_dbg_path("debug_cnqt.png"), timeout=5000)
+                except Exception:
+                    pass
+                break
+            # quay lại danh sách xem còn lời mời khác không
+            try:
+                await page.goto("https://myaccount.google.com/brandaccounts?si=1&hl=en",
+                                wait_until="domcontentloaded", timeout=45000)
+                await page.wait_for_timeout(2500)
+            except Exception:
+                pass
+
+        if _done and not _fail:
+            log_fn(f"  [CNQT] ✅ Đã chấp nhận {_done} lời mời quản trị.")
+            return True, "", f"Chấp nhận QT OK ({_done} lời mời)"
+        if _done and _fail:
+            return True, "", f"Chấp nhận QT: xong {_done}, lỗi: {'; '.join(_fail[:2])}"
+        return False, "", f"Chấp nhận QT thất bại: {'; '.join(_fail[:2]) or 'không rõ'} (xem debug_cnqt.png)"
+
+
 async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                              owner_email: str = "", totp_secret: str = "",
                              skip_create_move: bool = False,
@@ -4744,6 +4942,56 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
             return False, "", ("Không mở được hộp Quản lý quyền — trang brand không có nút Manage "
                                "(xem debug_addqt_owner.png + debug_addqt_dom.txt)")
 
+        # (4.5b) KIỂM TRA QUYỀN CỦA CHÍNH MÌNH trong hộp 'Manage permissions'.
+        # Google CHỈ cho Owner / Primary owner thêm người dùng làm Owner. Nếu tài khoản đang
+        # đăng nhập chỉ là 'Manager' → KHÔNG BAO GIỜ chọn được vai trò Owner (INVITE luôn xám).
+        # → Phát hiện sớm để báo lỗi rõ ràng, không phí 6 vòng thử vô ích.
+        try:
+            _my = await page.evaluate(r"""() => {
+                // Tìm hàng 'You (...)' rồi đọc CHÍNH XÁC ô vai trò HIỂN THỊ trên hàng đó.
+                // ⚠ KHÔNG đọc innerText cả vùng: ô vai trò là dropdown có option ẩn ('Manager')
+                //   → đọc cả vùng sẽ nhận nhầm là 'manager' dù thực tế đang là 'Owner'.
+                const EX = {'owner':'owner', 'chủ sở hữu':'owner',
+                            'manager':'manager', 'người quản lý':'manager',
+                            'primary owner':'primary', 'chủ sở hữu chính':'primary'};
+                let you = null;
+                for (const e of document.querySelectorAll('*')) {
+                    if (e.offsetParent === null) continue;
+                    const t = (e.innerText || '').trim();
+                    if (!/^You\s*\(|^Bạn\s*\(/i.test(t)) continue;
+                    if (t.length > 80) continue;
+                    you = e; break;
+                }
+                if (!you) return '';
+                const yr = you.getBoundingClientRect();
+                const ycy = yr.top + yr.height / 2;
+                // quét phần tử NHỎ (lá) có text ĐÚNG BẰNG tên vai trò, nằm CÙNG HÀNG với 'You (...)'
+                let best = '', bestArea = 1e18;
+                for (const e of document.querySelectorAll('*')) {
+                    if (e.offsetParent === null) continue;
+                    if (e.children.length > 1) continue;              // chỉ lấy phần tử lá
+                    const t = (e.textContent || '').trim().toLowerCase();
+                    if (!(t in EX)) continue;                          // phải khớp CHÍNH XÁC
+                    const r = e.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) continue;
+                    const cy = r.top + r.height / 2;
+                    if (Math.abs(cy - ycy) > 18) continue;             // cùng hàng ngang
+                    if (r.left < yr.left) continue;                    // vai trò nằm bên phải tên
+                    const a = r.width * r.height;
+                    if (a < bestArea) { bestArea = a; best = EX[t]; }
+                }
+                return best;
+            }""")
+        except Exception:
+            _my = ""
+        if _my:
+            log_fn(f"  [ADDQT] (quyền của tài khoản trên brand: {_my})")
+        # ⚠ KHÔNG chặn cứng ở đây (đọc quyền có thể sai). Việc chặn dựa vào 'dropdown vai trò
+        #   có option Owner hay không' ở bước sau — chính xác hơn nhiều.
+        if _my == "manager":
+            log_fn("  [ADDQT] ⚠ Có vẻ tài khoản chỉ là MANAGER — vẫn thử tiếp, sẽ kiểm tra lại "
+                   "bằng danh sách vai trò thật.")
+
         # (4.6) Bấm icon 'Thêm người dùng' (góc phải trên hộp). Icon KHÔNG có chữ → bấm nút
         #       ICON-ONLY (bỏ nút DONE/Cancel có chữ) hoặc nút có aria-label add/invite/member.
         async def _add_dialog_showing() -> bool:
@@ -4897,6 +5145,294 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
         _OPEN = ["choose a role", "chọn một vai trò", "select a role"]
         _OWNER = ["owner", "chủ sở hữu", "所有者", "소유자"]
 
+        # ══ NHẬN DIỆN ĐÚNG DROPDOWN CỦA HỘP 'Add new users' ══
+        # Trang có 2 dropdown giống hệt nhau (1 của user CŨ trong danh sách, 1 của hộp mới).
+        # DẤU HIỆU DUY NHẤT: chỉ dropdown của HỘP mới có option 'Choose a role'.
+        # ══════════════════════════════════════════════════════════════════
+        #  CÁCH CHỌN 'Owner' — ĐÃ KIỂM CHỨNG TRỰC TIẾP TRÊN TRANG GOOGLE THẬT
+        #  Trang có 3 NHÓM option giống nhau:
+        #    A) dropdown của user CŨ           → cột x KHÁC  (vd x=1250)
+        #    B) ô hiển thị giá trị của hộp     → cùng cột, CHỈ ô đang chọn cao 33, còn lại CAO 0
+        #    C) menu ĐÃ BUNG của hộp          → cùng cột, các option đều CAO > 0  ← PHẢI CLICK CÁI NÀY
+        #  ⇒ Quy tắc: option 'Owner' hợp lệ = CAO > 0  VÀ  CÙNG CỘT X với ô 'Choose a role'.
+        # ══════════════════════════════════════════════════════════════════
+        _JS_ROLE = r"""
+            const _OPT = '[role="option"], div[jsname="wQNmvb"]';
+            const _T = e => (e.textContent || '').trim().toLowerCase();
+            const _OWN = ['owner','chủ sở hữu','所有者','소유자'];
+            const _CHS = ['choose a role','chọn một vai trò','select a role'];
+            // Cột X của ô vai trò TRONG HỘP (mốc = option 'Choose a role' — chỉ hộp mới có)
+            function boxColX() {
+                let x = null;
+                for (const o of document.querySelectorAll(_OPT)) {
+                    if (_CHS.indexOf(_T(o)) < 0) continue;
+                    const r = o.getBoundingClientRect();
+                    if (r.height > 0) return r.left;        // ưu tiên ô đang hiển thị
+                    if (x === null) x = r.left;             // dự phòng khi đã chọn xong
+                }
+                return x;
+            }
+            // Ô đang HIỂN THỊ giá trị vai trò của hộp (cao > 0, cùng cột, aria-selected=true)
+            function boxShown() {
+                const x = boxColX(); if (x === null) return null;
+                for (const o of document.querySelectorAll(_OPT)) {
+                    const r = o.getBoundingClientRect();
+                    if (r.height <= 0) continue;
+                    if (Math.abs(r.left - x) > 60) continue;
+                    if (o.getAttribute('aria-selected') !== 'true') continue;
+                    return o;
+                }
+                return null;
+            }
+            // Option 'Owner' trong MENU ĐANG BUNG của hộp (cao > 0 + cùng cột + không phải ô hiển thị)
+            function boxOwnerOpen() {
+                const x = boxColX(); if (x === null) return null;
+                const shown = boxShown();
+                for (const o of document.querySelectorAll(_OPT)) {
+                    if (_OWN.indexOf(_T(o)) < 0) continue;
+                    const r = o.getBoundingClientRect();
+                    if (r.height <= 0) continue;              // ⚠ CAO 0 = menu chưa bung → bỏ
+                    if (Math.abs(r.left - x) > 60) continue;  // ⚠ khác cột = dropdown user cũ → bỏ
+                    if (o === shown) continue;
+                    return o;
+                }
+                return null;
+            }
+        """
+
+        async def _role_is_owner() -> bool:
+            """Ô vai trò của HỘP đang hiển thị 'Owner' chưa (đã kiểm chứng trên trang thật)."""
+            try:
+                return await page.evaluate(_JS_ROLE + r"""
+                (() => {
+                    const s = boxShown();
+                    return !!s && _OWN.indexOf(_T(s)) >= 0;
+                })()""")
+            except Exception:
+                return False
+
+        async def _pick_owner_real() -> bool:
+            """Chọn 'Owner': bung menu (click ô hiển thị) → click option Owner CAO>0 cùng cột."""
+            try:
+                if await _role_is_owner():
+                    return True
+                # 1) Chưa thấy option Owner cao > 0 → menu chưa bung → CLICK ô hiển thị để bung
+                need_open = await page.evaluate(_JS_ROLE + "(() => !boxOwnerOpen())()")
+                if need_open:
+                    pos = await page.evaluate(_JS_ROLE + r"""
+                    (() => {
+                        const s = boxShown(); if (!s) return null;
+                        const r = s.getBoundingClientRect();
+                        return {x: r.left + r.width/2, y: r.top + r.height/2};
+                    })()""")
+                    if not pos:
+                        log_fn("  [ADDQT] (pick Owner: không thấy ô vai trò của hộp)")
+                        return False
+                    await page.mouse.click(pos["x"], pos["y"])      # click chuột THẬT → bung menu
+                    await page.wait_for_timeout(900)
+                # 2) Menu đã bung → click đúng option Owner (dùng .click() — đã kiểm chứng ăn)
+                ok = await page.evaluate(_JS_ROLE + r"""
+                (() => {
+                    const t = boxOwnerOpen();
+                    if (!t) return false;
+                    try { t.click(); } catch (e) { return false; }
+                    return true;
+                })()""")
+                if not ok:
+                    log_fn("  [ADDQT] (pick Owner: menu chưa bung ra option Owner)")
+                    return False
+                await page.wait_for_timeout(900)
+                return await _role_is_owner()
+            except Exception:
+                return False
+
+        _JS_FIND_LB = r"""
+            const _OPTSEL = '[role="option"], div[jsname="wQNmvb"]';
+            function _txt(e) { return (e.textContent || '').trim().toLowerCase(); }
+            // Option 'Choose a role' CHỈ tồn tại ở dropdown của hộp 'Add new users'
+            function findChooseOpt() {
+                for (const o of document.querySelectorAll(_OPTSEL)) {
+                    const t = _txt(o);
+                    if (t === 'choose a role' || t === 'chọn một vai trò' || t === 'select a role')
+                        return o;
+                }
+                return null;
+            }
+            // Tìm option 'Owner' CÙNG DROPDOWN với 'Choose a role':
+            // leo dần lên từ 'Choose a role', cấp NÀO chứa 'Owner' ĐẦU TIÊN thì đó là dropdown
+            // của hộp (vì 'Choose a role' chỉ có ở dropdown hộp) → không đụng dropdown user cũ.
+            function findBoxOwnerOpt() {
+                const c = findChooseOpt();
+                if (!c) return null;
+                let node = c.parentElement;
+                for (let k = 0; k < 5 && node; k++) {
+                    for (const o of node.querySelectorAll(_OPTSEL)) {
+                        const t = _txt(o);
+                        if (t === 'owner' || t === 'chủ sở hữu' || t === '所有者' || t === '소유자')
+                            return o;
+                    }
+                    node = node.parentElement;
+                }
+                return null;
+            }
+            function findBoxListbox() {
+                const o = findBoxOwnerOpt();
+                return o ? o.parentElement : null;
+            }
+        """
+
+        async def _role_chosen_v2() -> bool:
+            """ĐÃ chọn Owner chưa — đọc aria-selected TRONG ĐÚNG dropdown của hộp 'Add new users'."""
+            try:
+                return await page.evaluate(_JS_FIND_LB + r"""
+                (() => {
+                    const own = findBoxOwnerOpt();          // option 'Owner' CỦA HỘP
+                    if (!own) return false;
+                    // đã chọn khi CHÍNH option Owner của hộp có aria-selected = true
+                    if (own.getAttribute('aria-selected') === 'true') return true;
+                    // dự phòng: 'Choose a role' hết được chọn cũng nghĩa là đã chốt vai trò
+                    const c = findChooseOpt();
+                    if (c && c.getAttribute('aria-selected') === 'false'
+                          && own.getAttribute('aria-selected') === 'true') return true;
+                    return false;
+                })()""")
+            except Exception:
+                return False
+
+        async def _box_role_geom() -> dict:
+            """Toạ độ ô vai trò (đang hiện) + option Owner của HỘP, kèm kích thước thật."""
+            try:
+                return await page.evaluate(_JS_FIND_LB + r"""
+                (() => {
+                    const c = findChooseOpt(), own = findBoxOwnerOpt();
+                    const g = (e) => {
+                        if (!e) return null;
+                        const r = e.getBoundingClientRect();
+                        return {x: r.left + r.width/2, y: r.top + r.height/2,
+                                w: r.width, h: r.height,
+                                sel: e.getAttribute('aria-selected')};
+                    };
+                    // ô đang HIỂN THỊ giá trị = option có aria-selected=true VÀ cao > 0
+                    let shown = null;
+                    for (const o of document.querySelectorAll(_OPTSEL)) {
+                        if (o.getAttribute('aria-selected') !== 'true') continue;
+                        const r = o.getBoundingClientRect();
+                        if (r.height <= 0) continue;
+                        const t = _txt(o);
+                        if (t === 'choose a role' || t === 'chọn một vai trò'
+                            || t === 'owner' || t === 'manager') {
+                            // ưu tiên đúng ô của HỘP (cùng nhánh với 'Choose a role')
+                            if (c && (o === c || o.parentElement === c.parentElement)) { shown = g(o); break; }
+                            if (!shown) shown = g(o);
+                        }
+                    }
+                    return {choose: g(c), owner: g(own), shown: shown};
+                })()""") or {}
+            except Exception:
+                return {}
+
+        async def _pick_owner_keyboard_v2() -> bool:
+            """Chọn Owner bằng BÀN PHÍM trên đúng ô vai trò của HỘP.
+            Danh sách kiểu 'listbox thu gọn' (option cao 0px) không click được → dùng phím:
+            focus ô 'Choose a role' → ArrowDown (Choose a role → Owner) → Enter chốt."""
+            try:
+                await page.evaluate(_JS_FIND_LB + r"""
+                (() => {
+                    const c = findChooseOpt();
+                    if (!c) return false;
+                    try { c.scrollIntoView({block:'center'}); } catch(e) {}
+                    try { c.focus(); } catch(e) {}
+                    return true;
+                })()""")
+                await page.wait_for_timeout(400)
+                # 'Choose a role' → ArrowDown 1 nhịp là tới 'Owner' (thứ tự DOM: choose, owner, manager)
+                for _step in range(3):
+                    await page.keyboard.press("ArrowDown")
+                    await page.wait_for_timeout(600)
+                    if await _role_chosen_v2():
+                        log_fn(f"  [ADDQT] (pick Owner: bàn phím ArrowDown x{_step + 1})")
+                        return True
+                    # thử chốt bằng Enter rồi kiểm tra lại
+                    await page.keyboard.press("Enter")
+                    await page.wait_for_timeout(600)
+                    if await _role_chosen_v2():
+                        log_fn(f"  [ADDQT] (pick Owner: bàn phím ArrowDown x{_step + 1} + Enter)")
+                        return True
+                return False
+            except Exception:
+                return False
+
+        async def _open_menu_parent_v2() -> bool:
+            """Mở menu bằng cách click phần tử CHA (container dropdown) — dự phòng khi
+            click thẳng vào ô hiển thị không bung menu."""
+            try:
+                box = await page.evaluate(_JS_FIND_LB + r"""
+                (() => {
+                    const c = findChooseOpt();
+                    if (!c) return null;
+                    // leo lên tìm container có thể click (role listbox/combobox/button)
+                    let n = c.parentElement;
+                    for (let k = 0; k < 4 && n; k++) {
+                        const role = (n.getAttribute && n.getAttribute('role')) || '';
+                        const r = n.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0 &&
+                            (role === 'listbox' || role === 'combobox' || role === 'button'
+                             || n.hasAttribute('aria-expanded'))) {
+                            return {x: r.left + r.width/2, y: r.top + r.height/2};
+                        }
+                        n = n.parentElement;
+                    }
+                    return null;
+                })()""")
+                if not box:
+                    return False
+                await page.mouse.click(box["x"], box["y"])
+                await page.wait_for_timeout(900)
+                return True
+            except Exception:
+                return False
+
+        async def _pick_owner_v2() -> bool:
+            """Chọn 'Owner' trong hộp 'Add new users'.
+            ⚠ MẤU CHỐT: option chỉ bấm được khi MENU ĐÃ BUNG (chiều cao > 0). Nếu Owner đang
+            cao = 0 → menu chưa mở → phải CLICK vào ô đang hiện giá trị để bung menu trước."""
+            try:
+                g = await _box_role_geom()
+                own = (g or {}).get("owner")
+                shown = (g or {}).get("shown") or (g or {}).get("choose")
+                # 1) Menu chưa bung (Owner cao = 0) → click ô đang hiện để MỞ menu
+                if (not own) or own.get("h", 0) <= 0:
+                    if not shown or shown.get("h", 0) <= 0:
+                        log_fn("  [ADDQT] (pick Owner: không thấy ô vai trò)")
+                        return False
+                    await page.mouse.click(shown["x"], shown["y"])   # click chuột THẬT → bung menu
+                    await page.wait_for_timeout(1000)
+                    g = await _box_role_geom()
+                    own = (g or {}).get("owner")
+                # 2) Menu đã bung → click đúng option Owner
+                if own and own.get("h", 0) > 0:
+                    await page.mouse.click(own["x"], own["y"])
+                    await page.wait_for_timeout(900)
+                    log_fn("  [ADDQT] (pick Owner: click option sau khi bung menu)")
+                    return await _role_chosen_v2()
+                # 3) Menu vẫn chưa bung → thử click CONTAINER cha, rồi lại click Owner
+                if await _open_menu_parent_v2():
+                    g = await _box_role_geom()
+                    own = (g or {}).get("owner")
+                    if own and own.get("h", 0) > 0:
+                        await page.mouse.click(own["x"], own["y"])
+                        await page.wait_for_timeout(900)
+                        log_fn("  [ADDQT] (pick Owner: click option sau khi mở bằng container)")
+                        return await _role_chosen_v2()
+                # 4) Cuối cùng: DÙNG BÀN PHÍM (listbox thu gọn chỉ đổi được bằng phím)
+                if await _pick_owner_keyboard_v2():
+                    return True
+                log_fn(f"  [ADDQT] (pick Owner: menu chưa bung — Owner cao "
+                       f"{(own or {}).get('h', '?')}px)")
+                return False
+            except Exception:
+                return False
+
         async def _role_chosen() -> bool:
             """ĐÃ chọn vai trò Owner trong hộp 'Add new users' hay chưa.
             ⚠ CHỈ xét BÊN TRONG hộp 'Add new users' — vì brand có thể ĐÃ CÓ SẴN user vai trò
@@ -4943,14 +5479,20 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                 return False
 
         async def _menu_open() -> bool:
-            # menu đang mở khi có ≥2 option hiển thị (Owner + Manager…)
+            # Menu CỦA HỘP đang mở = trong listbox của hộp có ≥2 option HIỂN THỊ.
+            # (Chỉ xét dropdown của hộp — dropdown user cũ không tính.)
             try:
-                return await page.evaluate(r"""() => {
+                return await page.evaluate(_JS_FIND_LB + r"""
+                (() => {
+                    const lb = findBoxListbox();
+                    if (!lb) return false;
                     let n = 0;
-                    for (const o of document.querySelectorAll('[role="option"], div[jsname="wQNmvb"]'))
-                        if (o.offsetParent !== null) n++;
+                    for (const o of lb.querySelectorAll('[role="option"], div[jsname="wQNmvb"]')) {
+                        const r = o.getBoundingClientRect();
+                        if (o.offsetParent !== null && r.width > 0 && r.height > 0) n++;
+                    }
                     return n >= 2;
-                }""")
+                })()""")
             except Exception:
                 return False
 
@@ -4971,7 +5513,10 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                         const a = r.width * r.height;
                         if (a > 0 && a < ba) { ba = a; scope = e; }
                     }
-                    const root = scope || document;
+                    // ⚠ KHÔNG tìm thấy hộp → TRẢ VỀ null (KHÔNG quét cả trang), tránh bấm nhầm
+                    //    ô vai trò của chính mình trong 'Manage permissions' → tự hạ quyền.
+                    if (!scope) return null;
+                    const root = scope;
                     for (const e of root.querySelectorAll('*')) {
                         if (e.offsetParent === null) continue;
                         if (e.getAttribute && e.getAttribute('role') === 'option') continue;
@@ -5108,6 +5653,51 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                     pass
             return False
 
+        # ⚠⚠ AN TOÀN TUYỆT ĐỐI: chỉ click option NẰM TRONG khung hộp 'Add new users'.
+        # (Trước đây các hàm pick quét CẢ TRANG → bấm nhầm ô vai trò của CHÍNH MÌNH trong danh
+        #  sách 'Manage permissions' phía sau → TỰ HẠ QUYỀN Owner → Manager. Cấm tuyệt đối.)
+        async def _pick_owner_in_box() -> bool:
+            try:
+                box = await page.evaluate(r"""(wants) => {
+                    // 1) khung hộp 'Add new users'
+                    let scope = null, ba = 1e18;
+                    for (const e of document.querySelectorAll('div, c-wiz, form')) {
+                        if (e.offsetParent === null) continue;
+                        const tl = (e.innerText || '').toLowerCase();
+                        if ((tl.indexOf('add new users') < 0 && tl.indexOf('thêm người dùng') < 0)
+                            || tl.indexOf('invite') < 0) continue;
+                        const r = e.getBoundingClientRect();
+                        const a = r.width * r.height;
+                        if (a > 0 && a < ba) { ba = a; scope = e; }
+                    }
+                    if (!scope) return null;
+                    const R = scope.getBoundingClientRect();
+                    // vùng hợp lệ = hộp (cho dropdown tràn xuống dưới tối đa 200px)
+                    const okPos = (r) => {
+                        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+                        return cx >= R.left - 20 && cx <= R.right + 20
+                            && cy >= R.top - 20  && cy <= R.bottom + 200;
+                    };
+                    // 2) tìm option 'Owner' HIỂN THỊ nằm trong vùng hợp lệ
+                    for (const o of document.querySelectorAll('[role="option"], div[jsname="wQNmvb"]')) {
+                        if (o.offsetParent === null) continue;      // phải đang hiện
+                        const t = (o.textContent || '').trim().toLowerCase();
+                        if (wants.indexOf(t) < 0) continue;          // đúng chữ 'Owner'
+                        const r = o.getBoundingClientRect();
+                        if (r.width <= 0 || r.height <= 0) continue;
+                        if (!okPos(r)) continue;                     // ⚠ NGOÀI hộp → BỎ QUA
+                        return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+                    }
+                    return null;
+                }""", ["owner", "chủ sở hữu", "所有者", "소유자"])
+                if not box:
+                    return False
+                await page.mouse.click(box["x"], box["y"])   # click chuột THẬT, đúng toạ độ
+                await page.wait_for_timeout(900)
+                return await _role_chosen()
+            except Exception:
+                return False
+
         # Click thẳng vào DIV option (không phải span) bằng Playwright — nhắm đúng phần tử, bỏ overlay.
         async def _pick_owner_div() -> bool:
             for _sel in ['div[jsname="wQNmvb"]', '[role="option"]']:
@@ -5133,23 +5723,63 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                     pass
             return False
 
+        # ── CHẨN ĐOÁN QUYỀN (làm TRƯỚC, tránh chạy mò rồi quá giờ) ─────────
+        # Google CHỈ hiện lựa chọn 'Owner' nếu tài khoản đang đăng nhập là Owner/Primary owner.
+        # Nếu tài khoản chỉ là 'Manager' → dropdown KHÔNG có 'Owner' → KHÔNG thể add chủ sở hữu.
+        if not await _menu_open():
+            await _open_dropdown()
+            await page.wait_for_timeout(900)
+        try:
+            _roles = await page.evaluate(r"""() => {
+                const out = [];
+                for (const o of document.querySelectorAll('[role="option"], div[jsname="wQNmvb"]')) {
+                    if (o.offsetParent === null) continue;
+                    const t = (o.textContent || '').trim();
+                    if (t && out.indexOf(t) < 0) out.push(t);
+                }
+                return out;
+            }""")
+        except Exception:
+            _roles = []
+        if _roles:
+            log_fn(f"  [ADDQT] Vai trò có thể chọn: {' | '.join(_roles[:6])}")
+        try:   # vai trò của CHÍNH tài khoản này trong brand (dòng 'You (...)')
+            _my_role = await page.evaluate(r"""() => {
+                const b = document.body ? (document.body.innerText || '') : '';
+                const m = b.match(/You\s*\([^)]*\)\s*\n?\s*(Primary owner|Owner|Manager)/i);
+                return m ? m[1] : '';
+            }""")
+        except Exception:
+            _my_role = ""
+        if _my_role:
+            log_fn(f"  [ADDQT] Quyền của tài khoản này trong brand: {_my_role}")
+        _has_owner_opt = any(("owner" in (r or "").lower() and "primary" not in (r or "").lower())
+                             for r in (_roles or []))
+        if _roles and not _has_owner_opt:
+            try:
+                await page.screenshot(path=_dbg_path("debug_addqt_owner.png"), timeout=5000)
+            except Exception:
+                pass
+            _mr = f" — quyền hiện tại: {_my_role}" if _my_role else ""
+            log_fn(f"  [ADDQT] ✗ Danh sách vai trò KHÔNG có 'Owner'{_mr}.")
+            return False, "", ("KHÔNG add được Chủ sở hữu: tài khoản này không đủ quyền"
+                               f"{_mr}. Chỉ Owner/Primary owner mới add được Owner. "
+                               f"Vai trò khả dụng: {', '.join(_roles[:5])}")
+
+        # ⚠ CHỈ dùng _pick_owner_v2/_role_chosen_v2: chúng nhắm ĐÚNG dropdown của hộp
+        #   'Add new users' (dropdown duy nhất có option 'Choose a role'), nên KHÔNG BAO GIỜ
+        #   đụng tới ô vai trò của chính mình trong danh sách (từng gây tự hạ Owner→Manager).
         _role_ok = False
         for _try in range(6):
-            if await _role_chosen():   # Owner đã aria-selected=true (trạng thái nội bộ) → xong
+            # ⚙ DÙNG CÁCH ĐÃ KIỂM CHỨNG TRỰC TIẾP TRÊN TRANG GOOGLE THẬT
+            if await _role_is_owner():
                 _role_ok = True
                 break
-            # CHỈ mở menu khi đang ĐÓNG (tránh bấm nhầm option 'Choose a role' làm reset)
-            if not await _menu_open():
-                await _open_dropdown()
-                await page.wait_for_timeout(600)
-            # chốt Owner: click đúng div option → dispatch sự kiện thẳng → Enter → dự phòng cũ
-            if (await _pick_owner_div() or await _pick_owner_dispatch()
-                    or await _pick_owner_enter()
-                    or await _pick_owner_playwright() or await _pick_owner_coord()):
+            if await _pick_owner_real():
                 _role_ok = True
                 break
             await page.wait_for_timeout(700)
-            if await _role_chosen():
+            if await _role_is_owner():
                 _role_ok = True
                 break
             log_fn(f"  [ADDQT] (chọn vai trò Owner: chưa xong, lần {_try + 1}/6)")
@@ -5167,8 +5797,50 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                 pass
             # DUMP DOM thật của ô vai trò để phân tích (không đoán nữa)
             try:
-                _dom = await page.evaluate(r"""() => {
+                _dom = await page.evaluate(_JS_FIND_LB + r"""(() => {
                     const out = [];
+                    // ── CHẨN ĐOÁN: tìm được option Owner của HỘP không? trạng thái ra sao? ──
+                    try {
+                        const c = findChooseOpt(), own = findBoxOwnerOpt();
+                        out.push('### CHAN DOAN ###');
+                        out.push('findChooseOpt: ' + (c ? 'CO' : 'KHONG'));
+                        if (c) {
+                            const rc = c.getBoundingClientRect();
+                            out.push('  choose aria-selected=' + c.getAttribute('aria-selected')
+                                + ' visible=' + (c.offsetParent !== null)
+                                + ' rect=' + Math.round(rc.left) + ',' + Math.round(rc.top)
+                                + ' ' + Math.round(rc.width) + 'x' + Math.round(rc.height));
+                        }
+                        out.push('findBoxOwnerOpt: ' + (own ? 'CO' : 'KHONG'));
+                        if (own) {
+                            const ro = own.getBoundingClientRect();
+                            out.push('  owner aria-selected=' + own.getAttribute('aria-selected')
+                                + ' visible=' + (own.offsetParent !== null)
+                                + ' rect=' + Math.round(ro.left) + ',' + Math.round(ro.top)
+                                + ' ' + Math.round(ro.width) + 'x' + Math.round(ro.height)
+                                + ' sameParentAsChoose=' + (c && own.parentElement === c.parentElement));
+                        }
+                        // đếm tổng số option 'Owner' trên trang
+                        let nOwn = 0;
+                        for (const o of document.querySelectorAll(_OPTSEL))
+                            if (_txt(o) === 'owner') nOwn++;
+                        out.push('tong so option "Owner" tren trang: ' + nOwn);
+                        // CẤU TRÚC CHA của ô vai trò (tìm trigger mở menu thật)
+                        if (c) {
+                            let n = c.parentElement;
+                            for (let k = 0; k < 5 && n; k++) {
+                                const r = n.getBoundingClientRect();
+                                out.push('  CHA[' + k + '] <' + n.tagName
+                                    + '> role="' + ((n.getAttribute && n.getAttribute('role')) || '')
+                                    + '" jsname="' + ((n.getAttribute && n.getAttribute('jsname')) || '')
+                                    + '" aria-expanded="' + ((n.getAttribute && n.getAttribute('aria-expanded')) || '')
+                                    + '" cls="' + String(n.className || '').slice(0, 60)
+                                    + '" rect=' + Math.round(r.width) + 'x' + Math.round(r.height));
+                                n = n.parentElement;
+                            }
+                        }
+                        out.push('');
+                    } catch (e) { out.push('chan doan loi: ' + e); }
                     document.querySelectorAll('select').forEach((s,i)=>{
                         out.push('=== SELECT#'+i+' visible='+(s.offsetParent!==null)
                             +' selIdx='+s.selectedIndex+' ===\n'+s.outerHTML.slice(0,900));
@@ -5189,7 +5861,7 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                         }
                     }
                     return out.join('\n\n');
-                }""")
+                })()""")
                 with open(_dbg_path("debug_addqt_dom.txt"), "w", encoding="utf-8") as _f:
                     _f.write(_dom or "(không tìm thấy phần tử vai trò)")
             except Exception:
@@ -5274,9 +5946,35 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                 pass
             return False
 
+        async def _click_invite_real() -> bool:
+            """Bấm INVITE — ĐÚNG CÁCH ĐÃ KIỂM CHỨNG TRÊN TRANG GOOGLE THẬT:
+            tìm phần tử text 'invite' đang HIỆN, KHÔNG disabled (xét cả 4 cấp cha) → .click()."""
+            try:
+                return await page.evaluate(r"""() => {
+                    for (const e of document.querySelectorAll('*')) {
+                        if (e.offsetParent === null) continue;
+                        const t = (e.textContent || '').trim().toLowerCase();
+                        if (t !== 'invite' && t !== 'mời') continue;
+                        if (e.children.length > 3) continue;
+                        let dis = false, n = e;
+                        for (let k = 0; k < 4 && n; k++) {
+                            if (n.getAttribute && (n.getAttribute('aria-disabled') === 'true'
+                                                   || n.hasAttribute('disabled'))) { dis = true; break; }
+                            n = n.parentElement;
+                        }
+                        if (dis) continue;               // nút còn xám → bỏ
+                        try { e.click(); } catch (err) { continue; }
+                        return true;
+                    }
+                    return false;
+                }""")
+            except Exception:
+                return False
+
         _inv_ok = False
         for _try in range(4):
-            if (await _click_invite_role() or await _click_invite_text()
+            if (await _click_invite_real() or await _click_invite_role()
+                    or await _click_invite_text()
                     or await _click_invite_js() or await _click_invite_coord()):
                 _inv_ok = True
                 # xác nhận hộp 'Add new users' đã đóng (INVITE ăn) — nếu còn thì thử lại

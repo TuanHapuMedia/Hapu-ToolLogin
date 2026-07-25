@@ -1,5 +1,5 @@
 {
-  "version": "2026.07.24-c",
-  "note": "Add Them QT: noi dieu kien xac nhan vai tro Owner (chi can INVITE bat + khong con 'Choose a role').",
+  "version": "2026.07.25-a",
+  "note": "Them nhiem vu 'Chap nhan QT'. Sua dut diem chon Owner + bam INVITE (da kiem chung tren trang that).",
   "files": ["auto_login_tool.py", "kiot_login_tool.py"]
 }

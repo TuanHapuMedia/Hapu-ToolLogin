@@ -93,6 +93,7 @@ import requests
 from auto_login_tool import (do_google_login, do_create_2fa, do_change_2fa,
                              do_channel, do_change_banner, do_leave_admin,
                              do_add_brand_admin, do_change_avatar, do_taodata_images,
+                             do_accept_brand_invite,
                              gpm_list, gpm_start, gpm_stop,
                              sync_time_offset, _DeviceCodeChallenge)
 from gpm_client import GPMClient
@@ -105,7 +106,7 @@ except Exception:
 #  PHIÊN BẢN TOOL — MỖI LẦN SỬA CODE, ĐỔI SỐ NÀY (ngày + số thứ tự trong ngày).
 #  Hiện ở tiêu đề cửa sổ + header để mỗi máy biết đang chạy bản nào.
 # ══════════════════════════════════════════════════════════════════════════
-APP_VERSION = "2026.07.24-c"
+APP_VERSION = "2026.07.25-a"
 
 # ══════════════════════════════════════════════════════════════════════════
 #  TỰ ĐỘNG CẬP NHẬT (qua GitHub) — mỗi máy khi mở tool sẽ hỏi version.json trên
@@ -447,6 +448,7 @@ class KiotLoginApp:
             ("rmadmin",    "🚪", "Thoát quản trị",  True),
             ("addqtth",    "➕", "Add QT TH",       False),
             ("addqtonly",  "➕", "Add Thêm QT",     False),
+            ("cnqt",       "✅", "Chấp nhận QT",   False),
             ("taodata",    "🗂️", "Tạo Data",         False),
         ]
 
@@ -1405,6 +1407,7 @@ class KiotLoginApp:
             "rmadmin":   "THOÁT QUẢN TRỊ",
             "addqtth":   "ADD QT TH",
             "addqtonly": "ADD THÊM QT",
+            "cnqt":      "CHẤP NHẬN QT",
             "taodata":   "TẠO DATA",
         }
         parts = " → ".join(_names.get(t, t.upper()) for t in selected)
@@ -1419,7 +1422,7 @@ class KiotLoginApp:
                                    "Hãy tick ít nhất 1 tác vụ ở panel bên trái.")
             return
         _READY = {"login", "create2fa", "change2fa", "channel", "getlink", "banner",
-                  "rmadmin", "addqtth", "addqtonly", "taodata"}
+                  "rmadmin", "addqtth", "addqtonly", "cnqt", "taodata"}
         _not_ready = [t for t in selected if t not in _READY]
         if _not_ready:
             _names = {"changepw": "Đổi mật khẩu"}
@@ -2191,6 +2194,8 @@ class KiotLoginApp:
             _addqt_note = ""    # vd "2FA 7 ngày" khi Google chặn xác minh
             _addqtonly_ok = None
             _addqtonly_note = ""
+            _cnqt_ok = None
+            _cnqt_note = ""
             _taodata_ok = None
             _taodata_detail = ""   # tóm tắt bước nào OK / lỗi
 
@@ -2436,7 +2441,7 @@ class KiotLoginApp:
                                 totp_secret=(new_totp or acc.get("totp", "")),
                                 skip_create_move=True,              # CHỈ add owner
                                 log_fn=lambda m: self._log(f"{tag}{m}", "muted")),
-                            timeout=300)
+                            timeout=420)
                         _addqtonly_ok = bool(oka)
                         if oka:
                             self._log(f"{tag} ✅ {msga}", "ok")
@@ -2456,6 +2461,38 @@ class KiotLoginApp:
                         _addqtonly_ok = False
                         self._log(f"{tag} ✗ Lỗi Add Thêm QT: {eao}", "err")
                         task_detail = (task_detail + f" | Lỗi Add Thêm QT: {eao}").strip(" |")
+
+                # ── CHẤP NHẬN QT: vào Brand Accounts → chấp nhận TẤT CẢ lời mời quản trị ──
+                async def _run_cnqt():
+                    nonlocal _cnqt_ok, _cnqt_note, task_detail
+                    self._log(f"{tag} ✅ Chấp nhận QT…", "muted")
+                    self._tree_upsert(email, status="⏳ Chấp nhận QT…", tag="run")
+                    try:
+                        okc2, _codec2, msgc2 = await asyncio.wait_for(
+                            do_accept_brand_invite(
+                                ws_url, email, password=acc.get("password", ""),
+                                totp_secret=(new_totp or acc.get("totp", "")),
+                                log_fn=lambda m: self._log(f"{tag}{m}", "muted")),
+                            timeout=300)
+                        _cnqt_ok = bool(okc2)
+                        if okc2:
+                            self._log(f"{tag} ✅ {msgc2}", "ok")
+                            task_detail = (task_detail + f" | Chấp nhận QT: {msgc2}").strip(" |")
+                        elif _codec2 == "2FA7D":
+                            _cnqt_note = "2FA 7 ngày"
+                            self._log(f"{tag} ⛔ Chấp nhận QT: 2FA 7 ngày", "warn")
+                            task_detail = (task_detail + " | Chấp nhận QT: 2FA 7 ngày").strip(" |")
+                        else:
+                            self._log(f"{tag} ⚠ Chấp nhận QT: {msgc2}", "warn")
+                            task_detail = (task_detail + f" | Chấp nhận QT lỗi: {msgc2}").strip(" |")
+                    except asyncio.TimeoutError:
+                        _cnqt_ok = False
+                        self._log(f"{tag} ✗ Chấp nhận QT QUÁ 5 PHÚT — bỏ qua.", "err")
+                        task_detail = (task_detail + " | Chấp nhận QT: quá giờ").strip(" |")
+                    except Exception as ec2:
+                        _cnqt_ok = False
+                        self._log(f"{tag} ✗ Lỗi Chấp nhận QT: {ec2}", "err")
+                        task_detail = (task_detail + f" | Lỗi Chấp nhận QT: {ec2}").strip(" |")
 
                 # ── TẠO DATA: đổi bìa + đổi avatar + chụp thông tin kênh ──
                 # Lỗi 1 bước VẪN chạy tiếp bước còn lại, ghi rõ bước nào lỗi.
@@ -2506,6 +2543,7 @@ class KiotLoginApp:
                     "rmadmin":   ("rmadmin", _run_rmadmin),
                     "addqtth":   ("addqtth", _run_addqtth),
                     "addqtonly": ("addqtonly", _run_addqtonly),
+                    "cnqt":      ("cnqt", _run_cnqt),
                     "taodata":   ("taodata", _run_taodata),
                 }
                 _run_order = [t for t in _sel if t != "login" and t in _dispatch]
@@ -2557,6 +2595,13 @@ class KiotLoginApp:
             elif success and _addqtonly_ok is False:
                 self._log(f"{tag} ⚠ ADD THÊM QT THẤT BẠI: {email}", "warn")
                 self._record(key, email, "ADD THÊM QT THẤT BẠI", ip_str,
+                             task_detail, channel or "")
+            elif success and _cnqt_ok is False and _cnqt_note == "2FA 7 ngày":
+                self._log(f"{tag} ⛔ 2FA 7 NGÀY (Chấp nhận QT): {email}", "warn")
+                self._record(key, email, "2FA 7 ngày", ip_str, task_detail, channel or "")
+            elif success and _cnqt_ok is False:
+                self._log(f"{tag} ⚠ CHẤP NHẬN QT THẤT BẠI: {email}", "warn")
+                self._record(key, email, "CHẤP NHẬN QT THẤT BẠI", ip_str,
                              task_detail, channel or "")
             elif success and _taodata_ok is False:
                 self._log(f"{tag} ⚠ TẠO DATA LỖI 1 PHẦN: {email} ({_taodata_detail})", "warn")
