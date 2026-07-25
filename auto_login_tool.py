@@ -4274,6 +4274,7 @@ async def _list_channel_ids(page, log_fn=None) -> list:
 
 async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                              owner_email: str = "", totp_secret: str = "",
+                             skip_create_move: bool = False,
                              log_fn=print) -> tuple[bool, str, str]:
     """ADD QUẢN TRỊ cho KÊNH THƯƠNG HIỆU. Luồng:
       1) Vào YouTube, đếm số kênh: 1 = chỉ kênh chính; ≥2 = đã có kênh thương hiệu.
@@ -4336,19 +4337,23 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
             return "accounts.google.com" not in (page.url or "")
 
         # ── B1: ĐẾM SỐ KÊNH ────────────────────────────────────────────────
-        log_fn("  [ADDQT] Kiểm tra số kênh của tài khoản…")
-        ids = await _list_channel_ids(page, log_fn)
-        if not ids:
-            return False, "", "Không đọc được danh sách kênh (mạng chậm/chưa đăng nhập?)"
-        n = len(ids)
-        log_fn(f"  [ADDQT] Tài khoản có {n} kênh: {', '.join(ids[:4])}")
-
-        if n >= 2:
-            log_fn("  [ADDQT] → ĐÃ CÓ kênh thương hiệu (≥2 kênh) → bỏ qua bước tạo.")
+        # 'Add Thêm QT' (skip_create_move=True): CHỈ add owner → bỏ qua đếm/tạo/chuyển kênh.
+        if skip_create_move:
             _has_brand = True
+            log_fn("  [ADDQT] (Add Thêm QT) → chỉ add mail quản trị, BỎ QUA tạo/chuyển kênh.")
         else:
-            log_fn("  [ADDQT] → Chỉ có 1 kênh (kênh chính) → CẦN TẠO kênh thương hiệu.")
-            _has_brand = False
+            log_fn("  [ADDQT] Kiểm tra số kênh của tài khoản…")
+            ids = await _list_channel_ids(page, log_fn)
+            if not ids:
+                return False, "", "Không đọc được danh sách kênh (mạng chậm/chưa đăng nhập?)"
+            n = len(ids)
+            log_fn(f"  [ADDQT] Tài khoản có {n} kênh: {', '.join(ids[:4])}")
+            if n >= 2:
+                log_fn("  [ADDQT] → ĐÃ CÓ kênh thương hiệu (≥2 kênh) → bỏ qua bước tạo.")
+                _has_brand = True
+            else:
+                log_fn("  [ADDQT] → Chỉ có 1 kênh (kênh chính) → CẦN TẠO kênh thương hiệu.")
+                _has_brand = False
 
         # ── B2: TẠO kênh thương hiệu (nếu chưa có) ─────────────────────────
         if not _has_brand:
@@ -4587,16 +4592,18 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
             await page.wait_for_timeout(8000)   # chờ YouTube xử lý move
             return "ok", ""
 
-        log_fn("  [ADDQT] Kiểm tra/chuyển kênh chính sang tài khoản thương hiệu…")
-        _mv, _mvmsg = await _do_move_channel()
-        if _mv == "2fa7d":
-            return False, "2FA7D", "2FA 7 ngày (Google chặn: We couldn't verify it's you)"
-        if _mv == "err":
-            return False, "", _mvmsg
-        if _mv == "skip":
-            log_fn("  [ADDQT] (ⓘ không thấy nút Move → kênh chính có vẻ đã ở brand account → bỏ qua move)")
-        else:
-            log_fn("  [ADDQT] ✅ Đã chuyển kênh chính sang tài khoản thương hiệu.")
+        # 'Add Thêm QT': BỎ QUA hẳn bước chuyển kênh, đi thẳng add owner.
+        if not skip_create_move:
+            log_fn("  [ADDQT] Kiểm tra/chuyển kênh chính sang tài khoản thương hiệu…")
+            _mv, _mvmsg = await _do_move_channel()
+            if _mv == "2fa7d":
+                return False, "2FA7D", "2FA 7 ngày (Google chặn: We couldn't verify it's you)"
+            if _mv == "err":
+                return False, "", _mvmsg
+            if _mv == "skip":
+                log_fn("  [ADDQT] (ⓘ không thấy nút Move → kênh chính có vẻ đã ở brand account → bỏ qua move)")
+            else:
+                log_fn("  [ADDQT] ✅ Đã chuyển kênh chính sang tài khoản thương hiệu.")
 
         # ── B4: ADD owner_email làm CHỦ SỞ HỮU kênh thương hiệu ─────────────
         if not owner_email or "@" not in owner_email:

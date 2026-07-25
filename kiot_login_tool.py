@@ -105,7 +105,7 @@ except Exception:
 #  PHIÊN BẢN TOOL — MỖI LẦN SỬA CODE, ĐỔI SỐ NÀY (ngày + số thứ tự trong ngày).
 #  Hiện ở tiêu đề cửa sổ + header để mỗi máy biết đang chạy bản nào.
 # ══════════════════════════════════════════════════════════════════════════
-APP_VERSION = "2026.07.23-w"
+APP_VERSION = "2026.07.23-x"
 
 # ══════════════════════════════════════════════════════════════════════════
 #  TỰ ĐỘNG CẬP NHẬT (qua GitHub) — mỗi máy khi mở tool sẽ hỏi version.json trên
@@ -446,6 +446,7 @@ class KiotLoginApp:
             ("banner",     "🎨", "Thay ảnh bìa",    True),
             ("rmadmin",    "🚪", "Thoát quản trị",  True),
             ("addqtth",    "➕", "Add QT TH",       False),
+            ("addqtonly",  "➕", "Add Thêm QT",     False),
             ("taodata",    "🗂️", "Tạo Data",         False),
         ]
 
@@ -1403,6 +1404,7 @@ class KiotLoginApp:
             "banner":    "THAY ẢNH BÌA",
             "rmadmin":   "THOÁT QUẢN TRỊ",
             "addqtth":   "ADD QT TH",
+            "addqtonly": "ADD THÊM QT",
             "taodata":   "TẠO DATA",
         }
         parts = " → ".join(_names.get(t, t.upper()) for t in selected)
@@ -1417,7 +1419,7 @@ class KiotLoginApp:
                                    "Hãy tick ít nhất 1 tác vụ ở panel bên trái.")
             return
         _READY = {"login", "create2fa", "change2fa", "channel", "getlink", "banner",
-                  "rmadmin", "addqtth", "taodata"}
+                  "rmadmin", "addqtth", "addqtonly", "taodata"}
         _not_ready = [t for t in selected if t not in _READY]
         if _not_ready:
             _names = {"changepw": "Đổi mật khẩu"}
@@ -2187,6 +2189,8 @@ class KiotLoginApp:
             _rmadmin_ok = None
             _addqt_ok = None
             _addqt_note = ""    # vd "2FA 7 ngày" khi Google chặn xác minh
+            _addqtonly_ok = None
+            _addqtonly_note = ""
             _taodata_ok = None
             _taodata_detail = ""   # tóm tắt bước nào OK / lỗi
 
@@ -2418,6 +2422,41 @@ class KiotLoginApp:
                         self._log(f"{tag} ✗ Lỗi Add QT TH: {ea}", "err")
                         task_detail = (task_detail + f" | Lỗi Add QT TH: {ea}").strip(" |")
 
+                # ── ADD THÊM QT: CHỈ add thêm 1 mail owner vào brand account có sẵn ──
+                # (bỏ qua tạo kênh + chuyển kênh — skip_create_move=True)
+                async def _run_addqtonly():
+                    nonlocal _addqtonly_ok, _addqtonly_note, task_detail
+                    self._log(f"{tag} ➕ Add Thêm QT…", "muted")
+                    self._tree_upsert(email, status="⏳ Add Thêm QT…", tag="run")
+                    try:
+                        oka, _codea, msga = await asyncio.wait_for(
+                            do_add_brand_admin(
+                                ws_url, email, password=acc.get("password", ""),
+                                owner_email=acc.get("owner", ""),   # cột E: mail quản trị
+                                totp_secret=(new_totp or acc.get("totp", "")),
+                                skip_create_move=True,              # CHỈ add owner
+                                log_fn=lambda m: self._log(f"{tag}{m}", "muted")),
+                            timeout=300)
+                        _addqtonly_ok = bool(oka)
+                        if oka:
+                            self._log(f"{tag} ✅ {msga}", "ok")
+                            task_detail = (task_detail + f" | Add Thêm QT: {msga}").strip(" |")
+                        elif _codea == "2FA7D":
+                            _addqtonly_note = "2FA 7 ngày"
+                            self._log(f"{tag} ⛔ Add Thêm QT: 2FA 7 ngày (Google chặn xác minh)", "warn")
+                            task_detail = (task_detail + " | Add Thêm QT: 2FA 7 ngày").strip(" |")
+                        else:
+                            self._log(f"{tag} ⚠ Add Thêm QT: {msga}", "warn")
+                            task_detail = (task_detail + f" | Add Thêm QT lỗi: {msga}").strip(" |")
+                    except asyncio.TimeoutError:
+                        _addqtonly_ok = False
+                        self._log(f"{tag} ✗ Add Thêm QT QUÁ 5 PHÚT — bỏ qua.", "err")
+                        task_detail = (task_detail + " | Add Thêm QT: quá giờ").strip(" |")
+                    except Exception as eao:
+                        _addqtonly_ok = False
+                        self._log(f"{tag} ✗ Lỗi Add Thêm QT: {eao}", "err")
+                        task_detail = (task_detail + f" | Lỗi Add Thêm QT: {eao}").strip(" |")
+
                 # ── TẠO DATA: đổi bìa + đổi avatar + chụp thông tin kênh ──
                 # Lỗi 1 bước VẪN chạy tiếp bước còn lại, ghi rõ bước nào lỗi.
                 async def _run_taodata():
@@ -2466,6 +2505,7 @@ class KiotLoginApp:
                     "banner":    ("banner", _run_banner),
                     "rmadmin":   ("rmadmin", _run_rmadmin),
                     "addqtth":   ("addqtth", _run_addqtth),
+                    "addqtonly": ("addqtonly", _run_addqtonly),
                     "taodata":   ("taodata", _run_taodata),
                 }
                 _run_order = [t for t in _sel if t != "login" and t in _dispatch]
@@ -2510,6 +2550,13 @@ class KiotLoginApp:
             elif success and _addqt_ok is False:
                 self._log(f"{tag} ⚠ ADD QT TH THẤT BẠI: {email}", "warn")
                 self._record(key, email, "ADD QT TH THẤT BẠI", ip_str,
+                             task_detail, channel or "")
+            elif success and _addqtonly_ok is False and _addqtonly_note == "2FA 7 ngày":
+                self._log(f"{tag} ⛔ 2FA 7 NGÀY (Add Thêm QT): {email}", "warn")
+                self._record(key, email, "2FA 7 ngày", ip_str, task_detail, channel or "")
+            elif success and _addqtonly_ok is False:
+                self._log(f"{tag} ⚠ ADD THÊM QT THẤT BẠI: {email}", "warn")
+                self._record(key, email, "ADD THÊM QT THẤT BẠI", ip_str,
                              task_detail, channel or "")
             elif success and _taodata_ok is False:
                 self._log(f"{tag} ⚠ TẠO DATA LỖI 1 PHẦN: {email} ({_taodata_detail})", "warn")
