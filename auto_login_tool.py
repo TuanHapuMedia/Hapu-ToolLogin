@@ -4898,19 +4898,48 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
         _OWNER = ["owner", "chủ sở hữu", "所有者", "소유자"]
 
         async def _role_chosen() -> bool:
-            # Widget Google: option có role="option" + aria-selected. ĐÃ chọn Owner khi
-            # option đang aria-selected=true chính là 'Owner' (đọc TRẠNG THÁI NỘI BỘ, không đoán chữ).
+            """ĐÃ chọn vai trò Owner trong hộp 'Add new users' hay chưa.
+            ⚠ CHỈ xét BÊN TRONG hộp 'Add new users' — vì brand có thể ĐÃ CÓ SẴN user vai trò
+            'Owner' ở danh sách phía sau (quét cả trang sẽ báo nhầm là đã chọn).
+            Dấu hiệu chắc chắn: hộp KHÔNG còn chữ 'Choose a role' và nút INVITE đã BẬT."""
             try:
                 return await page.evaluate(r"""() => {
-                    const OK = ['owner','chủ sở hữu','所有者','소유자'];
-                    let ownerSel = false;
-                    const sel = document.querySelectorAll(
-                        '[role="option"][aria-selected="true"], div[jsname="wQNmvb"][aria-selected="true"]');
-                    for (const o of sel) {
-                        const t = (o.textContent||'').trim().toLowerCase();
-                        if (OK.indexOf(t) >= 0) ownerSel = true;
+                    // 1) tìm HỘP 'Add new users' (phần tử nhỏ nhất chứa cả tiêu đề + nút INVITE)
+                    let box = null, ba = 1e18;
+                    for (const e of document.querySelectorAll('div, c-wiz, form')) {
+                        if (e.offsetParent === null) continue;
+                        const t = (e.innerText || '');
+                        const tl = t.toLowerCase();
+                        if ((tl.indexOf('add new users') < 0 && tl.indexOf('thêm người dùng') < 0)
+                            || tl.indexOf('invite') < 0) continue;
+                        const r = e.getBoundingClientRect();
+                        const a = r.width * r.height;
+                        if (a > 0 && a < ba) { ba = a; box = e; }
                     }
-                    return ownerSel;
+                    if (!box) return false;
+                    const bt = (box.innerText || '').toLowerCase();
+                    // 2) còn 'Choose a role' → CHƯA chọn
+                    if (bt.indexOf('choose a role') >= 0 || bt.indexOf('chọn một vai trò') >= 0)
+                        return false;
+                    // 3) menu còn mở (thấy cả Manager) → chưa chốt
+                    if (bt.indexOf('manager') >= 0 || bt.indexOf('người quản lý') >= 0) return false;
+                    // 4) phải thấy 'Owner' trong hộp
+                    const hasOwner = (bt.indexOf('owner') >= 0 || bt.indexOf('chủ sở hữu') >= 0);
+                    if (!hasOwner) return false;
+                    // 5) XÁC NHẬN CUỐI: nút INVITE đã BẬT (không disabled/xám)
+                    for (const e of box.querySelectorAll('*')) {
+                        if (e.offsetParent === null) continue;
+                        const t = (e.textContent || '').trim().toLowerCase();
+                        if (t !== 'invite' && t !== 'mời') continue;
+                        let n = e;
+                        for (let k = 0; k < 4 && n; k++) {
+                            if (n.getAttribute && (n.getAttribute('aria-disabled') === 'true'
+                                                   || n.hasAttribute('disabled'))) return false;
+                            n = n.parentElement;
+                        }
+                        return true;   // thấy INVITE và không disabled → ĐÃ chọn xong vai trò
+                    }
+                    return true;
                 }""")
             except Exception:
                 return False
@@ -4929,10 +4958,23 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
 
         async def _open_dropdown():
             # Mở list bằng cách click TRIGGER (phần tử hiển thị giá trị, KHÔNG phải 1 option trong list).
-            # Tránh bấm nhầm option 'Choose a role' khi menu đã mở.
+            # ⚠ CHỈ tìm BÊN TRONG hộp 'Add new users' — tránh bấm nhầm ô vai trò của user ĐÃ CÓ SẴN
+            #   trong danh sách 'Manage permissions' phía sau.
             try:
                 box = await page.evaluate(r"""(words) => {
-                    for (const e of document.querySelectorAll('*')) {
+                    // khoanh vùng hộp 'Add new users' (nhỏ nhất chứa tiêu đề + INVITE)
+                    let scope = null, ba = 1e18;
+                    for (const e of document.querySelectorAll('div, c-wiz, form')) {
+                        if (e.offsetParent === null) continue;
+                        const tl = (e.innerText || '').toLowerCase();
+                        if ((tl.indexOf('add new users') < 0 && tl.indexOf('thêm người dùng') < 0)
+                            || tl.indexOf('invite') < 0) continue;
+                        const r = e.getBoundingClientRect();
+                        const a = r.width * r.height;
+                        if (a > 0 && a < ba) { ba = a; scope = e; }
+                    }
+                    const root = scope || document;
+                    for (const e of root.querySelectorAll('*')) {
                         if (e.offsetParent === null) continue;
                         if (e.getAttribute && e.getAttribute('role') === 'option') continue;
                         if (e.closest && e.closest('[role="option"]')) continue;

@@ -1,5 +1,5 @@
 {
-  "version": "2026.07.24-a",
-  "note": "Add Them QT: bao LOI ro khi thieu mail quan tri o cot E (khong bao thanh cong nham).",
+  "version": "2026.07.24-b",
+  "note": "Sua loi chon vai tro Owner khi brand DA CO san user Owner (chi xet trong hop Add new users).",
   "files": ["auto_login_tool.py", "kiot_login_tool.py"]
 }
