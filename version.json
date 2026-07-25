@@ -1,5 +1,5 @@
 {
-  "version": "2026.07.23-x",
-  "note": "Thêm nhiệm vụ 'Add Thêm QT' (chỉ add mail quản trị vào brand có sẵn).",
+  "version": "2026.07.24-a",
+  "note": "Add Them QT: bao LOI ro khi thieu mail quan tri o cot E (khong bao thanh cong nham).",
   "files": ["auto_login_tool.py", "kiot_login_tool.py"]
 }

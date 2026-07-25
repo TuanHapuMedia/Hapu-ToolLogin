@@ -105,7 +105,7 @@ except Exception:
 #  PHIÊN BẢN TOOL — MỖI LẦN SỬA CODE, ĐỔI SỐ NÀY (ngày + số thứ tự trong ngày).
 #  Hiện ở tiêu đề cửa sổ + header để mỗi máy biết đang chạy bản nào.
 # ══════════════════════════════════════════════════════════════════════════
-APP_VERSION = "2026.07.23-x"
+APP_VERSION = "2026.07.24-a"
 
 # ══════════════════════════════════════════════════════════════════════════
 #  TỰ ĐỘNG CẬP NHẬT (qua GitHub) — mỗi máy khi mở tool sẽ hỏi version.json trên

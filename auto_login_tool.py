@@ -4607,9 +4607,14 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
 
         # ── B4: ADD owner_email làm CHỦ SỞ HỮU kênh thương hiệu ─────────────
         if not owner_email or "@" not in owner_email:
+            # 'Add Thêm QT' CHỈ có mỗi việc add mail → không có mail = LỖI (không được báo OK).
+            if skip_create_move:
+                log_fn("  [ADDQT] ✗ KHÔNG có mail quản trị (cột E trống) → không add được.")
+                return False, "", ("Add Thêm QT: THIẾU mail quản trị ở cột E "
+                                   "(dòng account phải là: mail|pass|recovery|2fa|MAIL_QUẢN_TRỊ)")
             _msg = ("Đã có sẵn kênh TH (bỏ qua tạo/move)" if _has_brand
                     else "Đã tạo + chuyển kênh sang TH") + " — KHÔNG có mail quản trị (cột E trống)"
-            log_fn(f"  [ADDQT] ⚠ Cột E (mail quản trị) trống → bỏ qua add owner.")
+            log_fn("  [ADDQT] ⚠ Cột E (mail quản trị) trống → bỏ qua add owner.")
             return True, "", _msg
 
         log_fn(f"  [ADDQT] Add owner '{owner_email}' vào kênh thương hiệu…")
