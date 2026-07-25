@@ -4918,15 +4918,13 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                     }
                     if (!box) return false;
                     const bt = (box.innerText || '').toLowerCase();
-                    // 2) còn 'Choose a role' → CHƯA chọn
+                    // 2) còn 'Choose a role' → CHƯA chọn (khi menu mở, option này vẫn hiện)
                     if (bt.indexOf('choose a role') >= 0 || bt.indexOf('chọn một vai trò') >= 0)
                         return false;
-                    // 3) menu còn mở (thấy cả Manager) → chưa chốt
-                    if (bt.indexOf('manager') >= 0 || bt.indexOf('người quản lý') >= 0) return false;
-                    // 4) phải thấy 'Owner' trong hộp
+                    // 3) phải thấy 'Owner' (nếu lỡ chọn Manager thì hộp hiện 'Manager' → false)
                     const hasOwner = (bt.indexOf('owner') >= 0 || bt.indexOf('chủ sở hữu') >= 0);
                     if (!hasOwner) return false;
-                    // 5) XÁC NHẬN CUỐI: nút INVITE đã BẬT (không disabled/xám)
+                    // 4) XÁC NHẬN CUỐI: nút INVITE đã BẬT (không disabled/xám)
                     for (const e of box.querySelectorAll('*')) {
                         if (e.offsetParent === null) continue;
                         const t = (e.textContent || '').trim().toLowerCase();

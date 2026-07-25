@@ -1,5 +1,5 @@
 {
-  "version": "2026.07.24-b",
-  "note": "Sua loi chon vai tro Owner khi brand DA CO san user Owner (chi xet trong hop Add new users).",
+  "version": "2026.07.24-c",
+  "note": "Add Them QT: noi dieu kien xac nhan vai tro Owner (chi can INVITE bat + khong con 'Choose a role').",
   "files": ["auto_login_tool.py", "kiot_login_tool.py"]
 }
