@@ -4434,13 +4434,32 @@ async def do_accept_brand_invite(ws_url: str, email: str = "", password: str = "
                     _fail.append("không qua xác minh")
                     break
                 await page.wait_for_timeout(2000)
-            # bấm CHẤP NHẬN (thử tối đa 4 lần)
+            # bấm CHẤP NHẬN — ⚠ KIỂM TRA KẾT QUẢ ĐỘC LẬP với việc click:
+            # (lỗi cũ: chỉ kiểm URL khi click trả True → click ăn nhưng URL đổi chậm thì các
+            #  vòng sau không còn nút, click trả False nên KHÔNG kiểm nữa → báo thất bại OAN.)
+            async def _accepted() -> bool:
+                """Đã chấp nhận xong: rời khỏi trang '/accept' (thường sang '/view')."""
+                if "/accept" not in (page.url or ""):
+                    return True
+                try:   # dự phòng: trang chi tiết brand có nút 'Quản lý quyền/Manage permissions'
+                    return await page.evaluate(r"""() => {
+                        const t = (document.body.innerText || '').toLowerCase();
+                        return t.indexOf('manage permissions') >= 0
+                            || t.indexOf('quản lý quyền') >= 0
+                            || t.indexOf('จัดการสิทธิ') >= 0
+                            || t.indexOf('권한 관리') >= 0;
+                    }""")
+                except Exception:
+                    return False
+
             _ok = False
-            for _t in range(4):
+            for _t in range(6):
+                if await _accepted():        # kiểm TRƯỚC mỗi vòng (bất kể click có ăn hay không)
+                    _ok = True
+                    break
                 if await _click_accept():
                     await page.wait_for_timeout(2500)
-                    # XONG khi URL đổi từ '/accept' → '/view'
-                    if "/accept" not in (page.url or ""):
+                    if await _accepted():
                         _ok = True
                         break
                 await page.wait_for_timeout(1200)
@@ -4462,6 +4481,44 @@ async def do_accept_brand_invite(ws_url: str, email: str = "", password: str = "
             except Exception:
                 pass
 
+        # ── XÁC MINH CUỐI (theo yêu cầu): đợi 3s → load lại trang Brand Accounts →
+        #    nếu KHÔNG CÒN lời mời nào ⇒ BÁO THÀNH CÔNG.
+        #    Mốc nhận diện: mục 'Lời mời đang chờ' CHỈ là thẻ <a> (bấm được) KHI CÒN lời mời;
+        #    hết lời mời thì nó chỉ còn <li> (không bấm được).
+        log_fn("  [CNQT] ⏳ Đợi 3s rồi mở lại trang Brand Accounts để kiểm tra…")
+        await page.wait_for_timeout(3000)
+        _still = None          # None = không kiểm được | True = còn | False = hết
+        try:
+            await page.goto("https://myaccount.google.com/brandaccounts?pli=1&hl=en",
+                            wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(2500)
+            if "accounts.google.com" in (page.url or ""):
+                await _reauth()
+                await page.wait_for_timeout(2000)
+            _still = await page.evaluate(r"""() => {
+                for (const a of document.querySelectorAll('a[href]')) {
+                    if (a.offsetParent === null) continue;
+                    const p = (a.getAttribute('href') || '').split('?')[0].split('#')[0];
+                    // mục 'Lời mời đang chờ' = link có path kết thúc bằng 'brandaccounts'
+                    if (/(^|\/)brandaccounts\/?$/.test(p)) return true;   // CÒN lời mời
+                }
+                return false;                                            // HẾT lời mời
+            }""")
+        except Exception:
+            _still = None
+
+        if _still is False:
+            _n = f" ({_done} lời mời)" if _done else ""
+            log_fn(f"  [CNQT] ✅ Kiểm tra lại: KHÔNG còn lời mời nào → hoàn tất{_n}.")
+            return True, "", f"Chấp nhận QT OK{_n} — đã kiểm tra lại: hết lời mời"
+        if _still is True:
+            log_fn(f"  [CNQT] ⚠ Kiểm tra lại: VẪN CÒN lời mời chưa chấp nhận (đã xong {_done}).")
+            if _done:
+                return True, "", (f"Chấp nhận QT: xong {_done} nhưng VẪN CÒN lời mời chưa nhận")
+            return False, "", ("Chấp nhận QT thất bại: vẫn còn lời mời chưa nhận"
+                               f"{' — ' + '; '.join(_fail[:2]) if _fail else ''} (xem debug_cnqt.png)")
+
+        # không kiểm tra lại được → dựa vào kết quả vòng chấp nhận
         if _done and not _fail:
             log_fn(f"  [CNQT] ✅ Đã chấp nhận {_done} lời mời quản trị.")
             return True, "", f"Chấp nhận QT OK ({_done} lời mời)"

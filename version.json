@@ -1,5 +1,5 @@
 {
-  "version": "2026.07.25-a",
-  "note": "Them nhiem vu 'Chap nhan QT'. Sua dut diem chon Owner + bam INVITE (da kiem chung tren trang that).",
+  "version": "2026.07.26-b",
+  "note": "Chap nhan QT: sua bao that bai oan + doi 3s roi kiem tra lai (het loi moi = thanh cong).",
   "files": ["auto_login_tool.py", "kiot_login_tool.py"]
 }
