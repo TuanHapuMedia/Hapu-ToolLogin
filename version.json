@@ -1,5 +1,5 @@
 {
-  "version": "2026.07.26-b",
-  "note": "Chap nhan QT: sua bao that bai oan + doi 3s roi kiem tra lai (het loi moi = thanh cong).",
+  "version": "2026.07.26-h",
+  "note": "Sua dut diem TAO KENH THUONG HIEU: bam dung nut tao kenh (theo href create_channel), dien ten dung o trong hop (khong go nham o tim kiem), bam dung nut Tao kenh trong hop thoai.",
   "files": ["auto_login_tool.py", "kiot_login_tool.py"]
 }

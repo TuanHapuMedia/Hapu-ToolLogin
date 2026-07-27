@@ -4643,55 +4643,104 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                 return False, "", f"Không lấy được tên kênh chính (đọc được: '{_cname}')"
             log_fn(f"  [ADDQT] Tên kênh chính (dùng cho kênh TH): {_cname}")
 
-            # (2.1) Mở trang account (ép tiếng Anh)
+            # (2.1) Mở trang DANH SÁCH KÊNH (channel_switcher) — nơi CÓ nút tạo kênh.
             try:
-                await page.goto("https://www.youtube.com/account?hl=en",
+                await page.goto("https://www.youtube.com/channel_switcher?hl=en",
                                 wait_until="domcontentloaded", timeout=40000)
-                await page.wait_for_timeout(2500)
+                await page.wait_for_timeout(3000)
             except Exception:
-                return False, "", "Không mở được trang youtube.com/account"
-
-            # (2.3) Bấm 'Create a new channel'
-            _clicked = False
-            for _t in ["Create a new channel", "Tạo kênh mới"]:
                 try:
-                    b = page.locator(f'a:has-text("{_t}"), button:has-text("{_t}"), '
-                                     f'[role="button"]:has-text("{_t}"), tp-yt-paper-item:has-text("{_t}")')
-                    if await b.count() > 0 and await b.first.is_visible():
-                        await b.first.click(timeout=5000)
-                        _clicked = True
-                        log_fn(f"  [ADDQT] ✓ Bấm '{_t}'")
-                        break
+                    await page.goto("https://www.youtube.com/account?hl=en",
+                                    wait_until="domcontentloaded", timeout=40000)
+                    await page.wait_for_timeout(2500)
                 except Exception:
-                    pass
+                    return False, "", "Không mở được trang danh sách kênh"
+
+            # (2.3) Bấm nút TẠO KÊNH.
+            # ⚠⚠ LỖI CŨ: chỉ tìm chữ 'Create a new channel' — nhưng nút thật là
+            #    'Create a channel' (thiếu chữ 'new' ⇒ KHÔNG khớp) ⇒ không bấm được, rồi
+            #    goto '/create_channel' KHÔNG có token ⇒ bị đá về trang kênh, hộp không mở.
+            #    ⇒ NHẮM THEO HREF '/create_channel' (đã kiểm chứng: nút là
+            #      <a href="/create_channel?channel_creation_token=…">), không phụ thuộc ngôn ngữ.
+            _clicked = False
+            try:
+                b = page.locator('a[href*="create_channel"]')
+                n = await b.count()
+                for i in range(min(n, 3)):
+                    el = b.nth(i)
+                    if await el.is_visible():
+                        await el.click(timeout=5000)
+                        _clicked = True
+                        log_fn("  [ADDQT] ✓ Bấm nút tạo kênh (theo href create_channel)")
+                        break
+            except Exception:
+                pass
+            if not _clicked:      # dự phòng: theo CHỮ, nhiều biến thể + ngôn ngữ
+                for _t in ["Create a channel", "Create channel", "Create a new channel",
+                           "Tạo kênh mới", "Tạo kênh", "สร้างช่อง", "채널 만들기", "创建频道"]:
+                    try:
+                        b = page.locator(f'a:has-text("{_t}"), button:has-text("{_t}"), '
+                                         f'[role="button"]:has-text("{_t}"), '
+                                         f'tp-yt-paper-item:has-text("{_t}")')
+                        if await b.count() > 0 and await b.first.is_visible():
+                            await b.first.click(timeout=5000)
+                            _clicked = True
+                            log_fn(f"  [ADDQT] ✓ Bấm '{_t}'")
+                            break
+                    except Exception:
+                        pass
             if not _clicked:
                 try:
-                    await page.goto("https://www.youtube.com/create_channel?hl=en",
-                                    wait_until="domcontentloaded", timeout=30000)
-                    _clicked = True
+                    await page.screenshot(path=_dbg_path("debug_addqt_create.png"), timeout=5000)
                 except Exception:
                     pass
-            await page.wait_for_timeout(3000)
+                return False, "", ("Không bấm được nút tạo kênh trên trang danh sách kênh "
+                                   "(xem debug_addqt_create.png)")
+            await page.wait_for_timeout(3500)   # chờ hộp 'How you'll appear' mở
 
             # (2.4) Hộp 'How you'll appear': điền Name = tên kênh chính. Tìm ô Name TRÊN MỌI FRAME.
             async def _fill_name() -> bool:
+                """Điền TÊN kênh vào ô 'Name' BÊN TRONG HỘP THOẠI.
+                ⚠⚠ LỖI CŨ (đã kiểm chứng trên trang thật): ô 'Name' KHÔNG phải input[type=text];
+                   selector cũ 'input[type=text]' lại khớp Ô TÌM KIẾM YouTube
+                   (name="search_query") ⇒ tool GÕ TÊN VÀO Ô TÌM KIẾM, ô Name vẫn trống nên
+                   nút 'Tạo kênh' không hoạt động.
+                   ⇒ CHỈ điền vào input NẰM TRONG hộp thoại, LOẠI ô tìm kiếm, và XÁC MINH
+                     giá trị sau khi gõ. KHÔNG bao giờ gõ ra ngoài hộp."""
+                _DLG = ('[role="dialog"]', '[aria-modal="true"]',
+                        'tp-yt-paper-dialog', 'ytcp-dialog')
                 for fr in ([page] + list(page.frames)):
-                    for _sel in ('input#name', 'input[aria-label="Name" i]',
-                                 'input[name="name" i]', 'input[type="text"]',
-                                 'tp-yt-paper-input input'):
+                    for _dsel in _DLG:
                         try:
-                            loc = fr.locator(_sel)
-                            nq = await loc.count()
-                            for i in range(min(nq, 3)):
-                                el = loc.nth(i)
-                                if await el.is_visible():
+                            dlg = fr.locator(_dsel)
+                            if await dlg.count() == 0:
+                                continue
+                            d = dlg.last
+                            # mọi ô nhập trong hộp, BỎ ô tìm kiếm + ô ẩn
+                            inp = d.locator('input:not([name="search_query"]):not([type="hidden"])'
+                                            ':not([type="checkbox"]):not([type="radio"]), textarea')
+                            nq = await inp.count()
+                            for i in range(min(nq, 4)):
+                                el = inp.nth(i)
+                                try:
+                                    if not await el.is_visible():
+                                        continue
                                     await el.click(timeout=3000)
                                     try:
                                         await el.fill("")
                                     except Exception:
                                         pass
                                     await el.type(_cname, delay=30)
-                                    return True
+                                    await page.wait_for_timeout(400)
+                                    # XÁC MINH đã vào đúng ô (ô Name phải có giá trị)
+                                    try:
+                                        _v = ((await el.input_value()) or "").strip()
+                                    except Exception:
+                                        _v = ""
+                                    if _v:
+                                        return True
+                                except Exception:
+                                    continue
                         except Exception:
                             pass
                 return False
@@ -4711,24 +4760,190 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
             log_fn(f"  [ADDQT] ✓ Điền Name = {_cname}, chờ Handle tự đề xuất…")
             await page.wait_for_timeout(4000)   # chờ YouTube đề xuất handle (dấu tích xanh)
 
-            # (2.5) Bấm 'Create channel'
-            _created = False
-            for _ in range(3):
+            # (2.5) Bấm 'Create channel' — NHIỀU NGÔN NGỮ + theo CẤU TRÚC (nút chính bên phải),
+            #        có CHỜ nút bật (handle hợp lệ mới bật) và bỏ qua nút Cancel.
+            _CRE_W = ["create channel", "create", "tạo kênh", "tạo", "สร้างช่อง", "สร้าง",
+                      "채널 만들기", "만들기", "创建频道", "创建", "建立頻道", "建立",
+                      "チャンネルを作成", "作成", "crear canal", "crear", "criar canal", "criar",
+                      "créer une chaîne", "créer", "kanal erstellen", "erstellen"]
+            _CAN_W = ["cancel", "hủy", "huỷ", "ยกเลิก", "취소", "取消", "キャンセル",
+                      "cancelar", "annuler", "abbrechen"]
+
+            async def _click_create_btn() -> bool:
                 try:
-                    b = page.locator(
-                        'button:has-text("Create channel"), a:has-text("Create channel"), '
-                        '[role="button"]:has-text("Create channel"), '
-                        'button:has-text("Tạo kênh"), [role="button"]:has-text("Tạo kênh")')
-                    if await b.count() > 0 and await b.first.is_visible():
-                        await b.first.click(timeout=5000)
-                        _created = True
-                        log_fn("  [ADDQT] ✓ Bấm 'Create channel'")
-                        break
+                    return await page.evaluate(r"""(args) => {
+                        const [CRE, CAN] = args;
+                        const vis = e => {
+                            if (!e || e.offsetParent === null) return false;
+                            const r = e.getBoundingClientRect();
+                            return r.width > 40 && r.height > 18;
+                        };
+                        const dis = e => {
+                            let n = e;
+                            for (let k = 0; k < 4 && n; k++) {
+                                if (n.getAttribute && (n.getAttribute('aria-disabled') === 'true'
+                                        || n.hasAttribute('disabled'))) return true;
+                                n = n.parentElement;
+                            }
+                            return false;
+                        };
+                        const cands = document.querySelectorAll(
+                            'button, [role="button"], ytcp-button, tp-yt-paper-button, div[jsname]');
+                        // 1) khớp CHỮ (nhiều ngôn ngữ), bỏ nút Cancel, bỏ nút đang tắt
+                        for (const e of cands) {
+                            if (!vis(e) || dis(e)) continue;
+                            const t = (e.innerText || '').trim().toLowerCase();
+                            if (!t || t.length > 30) continue;
+                            if (CAN.some(c => t === c)) continue;
+                            if (CRE.some(c => t === c)) { try { e.click(); return true; } catch (x) {} }
+                        }
+                        // 2) theo CẤU TRÚC: trong hộp thoại, nút BẬT nằm XA NHẤT bên phải
+                        //    (Cancel luôn ở trái) — không phụ thuộc ngôn ngữ.
+                        let dlg = null, ba = 1e18;
+                        for (const d of document.querySelectorAll('[role="dialog"], tp-yt-paper-dialog, ytcp-dialog')) {
+                            if (d.offsetParent === null) continue;
+                            const r = d.getBoundingClientRect();
+                            const a = r.width * r.height;
+                            if (a > 0 && a < ba) { ba = a; dlg = d; }
+                        }
+                        const root = dlg || document;
+                        let best = null, bx = -1;
+                        for (const e of root.querySelectorAll('button, [role="button"], ytcp-button, tp-yt-paper-button')) {
+                            if (!vis(e) || dis(e)) continue;
+                            const t = (e.innerText || '').trim().toLowerCase();
+                            if (CAN.some(c => t === c)) continue;      // bỏ Cancel
+                            const r = e.getBoundingClientRect();
+                            if (r.left > bx) { bx = r.left; best = e; }
+                        }
+                        if (best) { try { best.click(); return true; } catch (x) {} }
+                        return false;
+                    }""", [_CRE_W, _CAN_W])
+                except Exception:
+                    return False
+
+            async def _click_create_old() -> bool:
+                """Bấm nút tạo kênh BÊN TRONG HỘP THOẠI.
+                ⚠⚠ LỖI CŨ (đã kiểm chứng trên trang thật): trang có 2 nút CÙNG CHỮ —
+                   <a> NGOÀI hộp (nút MỞ hộp, y≈150) và <button> TRONG hộp (y≈922).
+                   Dùng .first sẽ bấm trúng nút NGOÀI → hộp đóng/mở lại → KHÔNG tạo được kênh.
+                   ⇒ Phải khoanh vùng trong dialog và ưu tiên thẻ <button>."""
+                for _dsel in ('[role="dialog"]', '[aria-modal="true"]',
+                              'tp-yt-paper-dialog', 'ytcp-dialog'):
+                    try:
+                        dlg = page.locator(_dsel)
+                        if await dlg.count() == 0:
+                            continue
+                        d = dlg.last
+                        for _w in ["Create channel", "Tạo kênh", "Create", "Tạo"]:
+                            b = d.locator(f'button:has-text("{_w}")')
+                            n = await b.count()
+                            for i in range(n):
+                                el = b.nth(i)
+                                if not await el.is_visible():
+                                    continue
+                                _t = ((await el.inner_text()) or "").strip().lower()
+                                if _t in ("cancel", "hủy", "huỷ"):
+                                    continue
+                                await el.click(timeout=5000)
+                                return True
+                    except Exception:
+                        pass
+                return False
+
+            async def _find_create_enabled() -> dict:
+                """Tìm nút TẠO KÊNH trong hộp — CHỈ trả toạ độ khi nút ĐÃ BẬT.
+                ⚠ TUYỆT ĐỐI không bấm 'Cancel'/'Choose photo' (từng bấm nhầm → đóng hộp,
+                  không tạo được kênh). Chỉ khớp CHỮ tạo-kênh, và phải KHÔNG disabled."""
+                try:
+                    return await page.evaluate(r"""(args) => {
+                        const [CRE, CAN] = args;
+                        const vis = e => {
+                            if (!e || e.offsetParent === null) return false;
+                            const r = e.getBoundingClientRect();
+                            return r.width > 40 && r.height > 18;
+                        };
+                        const dis = e => {
+                            let n = e;
+                            for (let k = 0; k < 4 && n; k++) {
+                                if (n.getAttribute && (n.getAttribute('aria-disabled') === 'true'
+                                        || n.hasAttribute('disabled'))) return true;
+                                n = n.parentElement;
+                            }
+                            return false;
+                        };
+                        const DLG = '[role="dialog"], [aria-modal="true"], tp-yt-paper-dialog, ytcp-dialog';
+                        let seen = [];
+                        for (const e of document.querySelectorAll(
+                                'button, [role="button"], ytcp-button, tp-yt-paper-button')) {
+                            if (!vis(e)) continue;
+                            // ⚠ CHỈ nhận nút BÊN TRONG hộp thoại (nút cùng chữ ở ngoài là nút MỞ hộp)
+                            if (!e.closest(DLG)) continue;
+                            const t = (e.innerText || '').trim().toLowerCase();
+                            if (!t || t.length > 30) continue;
+                            seen.push(t + (dis(e) ? '(tat)' : '(bat)'));
+                            if (CAN.some(c => t === c)) continue;         // KHÔNG bấm Cancel
+                            if (!CRE.some(c => t === c)) continue;        // phải đúng chữ tạo kênh
+                            if (dis(e)) return {wait: true, seen: seen};  // có nút nhưng CHƯA BẬT
+                            const r = e.getBoundingClientRect();
+                            return {x: r.left + r.width / 2, y: r.top + r.height / 2, seen: seen};
+                        }
+                        return {seen: seen};
+                    }""", [_CRE_W, _CAN_W]) or {}
+                except Exception:
+                    return {}
+
+            _created = False
+            _seen_last = []
+            for _try_c in range(15):         # chờ tới ~30s cho handle đề xuất + nút BẬT
+                # 1) CÁCH CŨ (Playwright click thật) — chỉ ăn khi nút đã bật
+                if await _click_create_old():
+                    _created = True
+                    log_fn("  [ADDQT] ✓ Bấm 'Create channel'")
+                    break
+                # 2) DỰ PHÒNG AN TOÀN: chỉ bấm khi tìm ĐÚNG nút tạo-kênh và nút ĐÃ BẬT
+                _g = await _find_create_enabled()
+                _seen_last = _g.get("seen") or _seen_last
+                if _g.get("x") is not None:
+                    await page.mouse.click(_g["x"], _g["y"])      # click CHUỘT THẬT
+                    _created = True
+                    log_fn("  [ADDQT] ✓ Bấm 'Create channel' (dự phòng: toạ độ, nút đã bật)")
+                    break
+                if _g.get("wait"):
+                    log_fn(f"  [ADDQT] (chờ nút tạo kênh BẬT… {_try_c + 1}/15)")
+                await page.wait_for_timeout(2000)
+            if not _created:
+                try:
+                    await page.screenshot(path=_dbg_path("debug_addqt_create.png"), timeout=5000)
                 except Exception:
                     pass
-                await page.wait_for_timeout(1500)
-            if not _created:
-                return False, "", "Không bấm được nút 'Create channel'"
+                try:   # DUMP các nút đang có để chẩn đoán chính xác
+                    _btns = await page.evaluate(r"""() => {
+                        const out = [];
+                        for (const e of document.querySelectorAll(
+                                'button, [role="button"], ytcp-button, tp-yt-paper-button')) {
+                            if (e.offsetParent === null) continue;
+                            const r = e.getBoundingClientRect();
+                            if (r.width < 20 || r.height < 12) continue;
+                            let d = false, n = e;
+                            for (let k = 0; k < 4 && n; k++) {
+                                if (n.getAttribute && (n.getAttribute('aria-disabled') === 'true'
+                                        || n.hasAttribute('disabled'))) { d = true; break; }
+                                n = n.parentElement;
+                            }
+                            out.push('<' + e.tagName + '> disabled=' + d
+                                + ' x=' + Math.round(r.left) + ' y=' + Math.round(r.top)
+                                + ' :: ' + JSON.stringify((e.innerText || '').trim().slice(0, 40)));
+                        }
+                        return 'URL-path: ' + location.pathname + '\n' + out.slice(0, 25).join('\n');
+                    }""")
+                    with open(_dbg_path("debug_addqt_create.txt"), "w", encoding="utf-8") as _f:
+                        _f.write("### CAC NUT THAY DUOC (bat/tat) ###\n"
+                                 + ", ".join(_seen_last or []) + "\n\n"
+                                 + (_btns or "(không thấy nút nào)"))
+                except Exception:
+                    pass
+                return False, "", ("Không bấm được nút 'Create channel' "
+                                   "(xem debug_addqt_create.png + debug_addqt_create.txt)")
             await page.wait_for_timeout(6000)   # chờ YouTube tạo xong + chuyển trang
 
             # (2.6) XÁC MINH: kênh mới cần THỜI GIAN lan vào channel_switcher → DÒ LẠI NHIỀU LẦN
