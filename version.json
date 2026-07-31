@@ -1,5 +1,5 @@
 {
-  "version": "2026.07.26-h",
-  "note": "Sua dut diem TAO KENH THUONG HIEU: bam dung nut tao kenh (theo href create_channel), dien ten dung o trong hop (khong go nham o tim kiem), bam dung nut Tao kenh trong hop thoai.",
+  "version": "2026.07.29-e",
+  "note": "Them 'Go nhu nguoi that' (mac dinh toan tool: email/pass/2FA/mail khoi phuc). Auto Typer (tuy chon) qua tien ich trong GPM; canh bao ro khi doi man hinh/thieu thu vien. Sua tao kenh thuong hieu.",
   "files": ["auto_login_tool.py", "kiot_login_tool.py"]
 }

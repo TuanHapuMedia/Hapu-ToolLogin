@@ -106,7 +106,7 @@ except Exception:
 #  PHIÊN BẢN TOOL — MỖI LẦN SỬA CODE, ĐỔI SỐ NÀY (ngày + số thứ tự trong ngày).
 #  Hiện ở tiêu đề cửa sổ + header để mỗi máy biết đang chạy bản nào.
 # ══════════════════════════════════════════════════════════════════════════
-APP_VERSION = "2026.07.26-h"
+APP_VERSION = "2026.07.29-e"
 
 # ══════════════════════════════════════════════════════════════════════════
 #  TỰ ĐỘNG CẬP NHẬT (qua GitHub) — mỗi máy khi mở tool sẽ hỏi version.json trên
@@ -710,6 +710,18 @@ class KiotLoginApp:
                   pady=4).pack(side=tk.LEFT, padx=(4, 0))
 
         # Region
+        # DÙNG AUTO TYPER: gõ email/mật khẩu/2FA bằng tiện ích Auto Typer trong GPM
+        # (chuột+bàn phím thật). Căn chỉnh 1 lần bằng CHAY_TEST_AUTOTYPER.bat.
+        self.autotyper_var = tk.BooleanVar(
+            value=bool(self._gsheet_load_cfg().get("autotyper", False)))
+        tk.Checkbutton(
+            right, text="⌨️ Dùng Auto Typer",
+            variable=self.autotyper_var, font=small9,
+            bg=self.COLOR_BG, fg="#7ee7a8",
+            selectcolor=self.COLOR_PANEL, activebackground=self.COLOR_BG,
+            relief=tk.FLAT
+        ).pack(anchor=tk.W, pady=(6, 0))
+
         tk.Label(right, text="\nVùng proxy (region):",
                  font=norm10, bg=self.COLOR_BG, fg=self.COLOR_MUTED).pack(anchor=tk.W)
         self.region_var = tk.StringVar(value="random")
@@ -1508,6 +1520,49 @@ class KiotLoginApp:
                 self._log(f"🧪 TEST init lỗi: {_e}", "err")
 
         region = self.region_var.get()
+        # BẬT/TẮT dùng Auto Typer cho việc gõ (email/mật khẩu/2FA)
+        try:
+            import auto_login_tool as _alt
+            _use_at = bool(getattr(self, "autotyper_var", None) and self.autotyper_var.get())
+            _alt.AUTOTYPER_ON = _use_at
+            if _use_at:
+                _pos = Path(__file__).parent / "data" / "autotyper_pos.json"
+                _ok_at = False
+                if not _pos.exists():
+                    self._log("⚠ Auto Typer: CHƯA CĂN CHỈNH toạ độ → tạm dùng cách gõ thường. "
+                              "Chạy CHAY_TEST_AUTOTYPER.bat một lần để căn chỉnh.", "warn")
+                else:
+                    # KIỂM TRA màn hình có KHỚP với lúc căn chỉnh không.
+                    # Toạ độ là pixel tuyệt đối → đổi máy/độ phân giải là SAI, phải căn lại.
+                    try:
+                        import json as _json
+                        import pyautogui as _pg
+                        _d = _json.loads(_pos.read_text(encoding="utf-8"))
+                        _saved = tuple(_d.get("screen") or [])
+                        _cur = tuple(_pg.size())
+                        if _saved and tuple(_saved) != _cur:
+                            _alt.AUTOTYPER_ON = False
+                            self._log(f"⚠ Auto Typer: MÀN HÌNH ĐÃ ĐỔI "
+                                      f"(căn chỉnh ở {_saved[0]}x{_saved[1]}, "
+                                      f"máy này {_cur[0]}x{_cur[1]}) → toạ độ sai, tạm gõ thường.",
+                                      "warn")
+                            self._log("   → Chạy CHAY_TEST_AUTOTYPER.bat trên MÁY NÀY để căn lại.",
+                                      "warn")
+                        else:
+                            _ok_at = True
+                    except ImportError:
+                        _alt.AUTOTYPER_ON = False
+                        self._log("⚠ Auto Typer: THIẾU thư viện (pyautogui/pyperclip/pygetwindow) "
+                                  "→ tạm gõ thường. Chạy CHAY_TOOL.bat 1 lần để cài.", "warn")
+                    except Exception:
+                        _ok_at = True   # không kiểm tra được thì cứ cho chạy
+                if _ok_at:
+                    self._log("⌨️ Auto Typer: BẬT — gõ bằng tiện ích (đừng đụng chuột/bàn phím).",
+                              "ok")
+                    self._log("   (các luồng sẽ gõ LẦN LƯỢT vì dùng chung 1 chuột)", "muted")
+        except Exception as _e:
+            self._log(f"⚠ Không bật được Auto Typer: {_e}", "warn")
+
         self._tree_clear()   # xoá bảng kết quả cũ
 
         def _finish():
@@ -1722,6 +1777,8 @@ class KiotLoginApp:
                 "enabled": bool(self.gsheet_on_var.get()),
                 "nolocal": bool(self.gsheet_nolocal_var.get()),
                 "test": bool(getattr(self, "test_mode_var", None) and self.test_mode_var.get()),
+                "autotyper": bool(getattr(self, "autotyper_var", None)
+                                  and self.autotyper_var.get()),
                 "threads": int(getattr(self, "concurrency_var", None).get()
                                if getattr(self, "concurrency_var", None) else 1),
             }, ensure_ascii=False, indent=1), encoding="utf-8")

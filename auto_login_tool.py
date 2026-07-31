@@ -6,6 +6,7 @@ Dùng: python auto_login_tool.py
 """
 import asyncio
 import logging
+import random
 import sys
 import threading
 import tkinter as tk
@@ -104,6 +105,254 @@ def _get_ws_url(debug_addr: str) -> str:
         except Exception:
             pass
     return f"ws://{debug_addr}"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  GÕ BẰNG TIỆN ÍCH 'AUTO TYPER' (extension trong GPM)
+#  Bật/tắt bằng biến AUTOTYPER_ON (kiot_login_tool set theo checkbox).
+#  Cách hoạt động (ĐÃ KIỂM CHỨNG THẬT):
+#    Playwright click ô đích → focus+phóng to cửa sổ → Alt+T mở side panel →
+#    dán text vào ô của Auto Typer → bấm START → extension gõ vào ô đích.
+#  ⚠ Dùng CHUỘT/BÀN PHÍM THẬT nên CHỈ chạy được 1 LUỒNG và không được đụng máy.
+# ══════════════════════════════════════════════════════════════════════════
+AUTOTYPER_ON = False          # kiot_login_tool sẽ bật lên khi tick checkbox
+_AT_PANEL_OPEN = set()        # các cửa sổ (theo tên) đã mở sẵn side panel
+# CHỈ 1 luồng được dùng chuột/bàn phím tại một thời điểm → chạy 2–3 luồng vẫn OK,
+# riêng phần GÕ thì lần lượt (luồng khác chờ tới lượt).
+_AT_LOCK = threading.Lock()
+_AT_TL = threading.local()   # mỗi LUỒNG nhớ cửa sổ của riêng nó (chạy 2-3 luồng vẫn đúng)
+
+
+def _at_hint() -> str:
+    """Gợi ý tên cửa sổ của luồng hiện tại (để focus đúng browser của luồng mình)."""
+    return getattr(_AT_TL, "hint", "") or ""
+
+
+def _at_pos() -> dict:
+    """Đọc toạ độ ô nhập + nút START đã căn chỉnh (data/autotyper_pos.json)."""
+    try:
+        import json as _j
+        p = Path(__file__).parent / "data" / "autotyper_pos.json"
+        d = _j.loads(p.read_text(encoding="utf-8"))
+        if d.get("input") and d.get("start"):
+            return d
+    except Exception:
+        pass
+    return {}
+
+
+def _at_focus_window(win_hint: str = "") -> str:
+    """Đưa ĐÚNG cửa sổ trình duyệt lên trước + phóng to.
+    `win_hint` = tên/ID profile (để chạy nhiều luồng vẫn chọn đúng cửa sổ của luồng mình).
+    Trả về tiêu đề cửa sổ đã focus ('' nếu không thấy)."""
+    try:
+        import pygetwindow as gw
+        import time as _t
+        wins = [w for w in gw.getAllWindows() if (w.title or "").strip()]
+        pick = None
+        # 1) ưu tiên cửa sổ có tên profile của CHÍNH luồng này
+        if win_hint:
+            h = str(win_hint).strip().lower()
+            for w in wins:
+                if h and h in (w.title or "").lower():
+                    pick = w
+                    break
+        # 2) không có thì lấy cửa sổ trình duyệt bất kỳ
+        if pick is None:
+            for w in wins:
+                t = (w.title or "")
+                if ("GPM" in t) or ("P-20" in t) or ("Chrome" in t) or ("Chromium" in t):
+                    pick = w
+                    break
+        if pick is None:
+            return ""
+        if pick.isMinimized:
+            pick.restore()
+        try:
+            pick.maximize()
+        except Exception:
+            pass
+        pick.activate()
+        _t.sleep(0.8)
+        return pick.title or ""
+    except Exception:
+        return ""
+
+
+async def _autotyper_type(page, locator, text: str, log_fn=print,
+                          timeout_s: int = 90, win_hint: str = "") -> bool:
+    """Gõ `text` vào ô `locator` BẰNG EXTENSION AUTO TYPER.
+    `win_hint`: tên/ID profile → focus ĐÚNG cửa sổ của luồng này (chạy nhiều luồng vẫn đúng).
+    ⚠ Chiếm chuột/bàn phím ⇒ có KHOÁ: các luồng gõ LẦN LƯỢT, không tranh nhau.
+    Trả True nếu ô đích nhận đủ chữ; False nếu hỏng (caller gõ theo cách thường)."""
+    if not text:
+        return False
+    pos = _at_pos()
+    if not pos:
+        log_fn("  [AT] ⚠ Chưa căn chỉnh toạ độ Auto Typer → gõ theo cách thường. "
+               "(chạy CHAY_TEST_AUTOTYPER.bat để căn chỉnh)")
+        return False
+    try:
+        import pyautogui
+        import pyperclip
+        import time as _t
+    except Exception:
+        log_fn("  [AT] ⚠ Thiếu pyautogui/pyperclip → gõ theo cách thường.")
+        return False
+
+    # ── CHỜ TỚI LƯỢT dùng chuột (không chặn luồng khác chạy việc của nó) ──
+    _waited = 0
+    while not _AT_LOCK.acquire(blocking=False):
+        await asyncio.sleep(0.5)
+        _waited += 1
+        if _waited == 20:
+            log_fn("  [AT] ⏳ Đang chờ luồng khác gõ xong…")
+        if _waited > 600:            # chờ quá 5 phút → bỏ, dùng cách thường
+            log_fn("  [AT] ⚠ Chờ lượt quá lâu → gõ theo cách thường.")
+            return False
+    try:
+        # 1) Focus ô đích trong trang (Auto Typer gõ vào ô đang có con trỏ)
+        try:
+            await locator.click(timeout=5000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(400)
+
+        # 2) Đưa ĐÚNG cửa sổ của luồng này lên trước + phóng to
+        _wt = _at_focus_window(win_hint)
+        if not _wt:
+            log_fn("  [AT] ⚠ Không tìm thấy cửa sổ trình duyệt → gõ theo cách thường.")
+            return False
+
+        # 3) Mở side panel — CHỈ 1 LẦN cho mỗi profile.
+        # ⚠⚠ LỖI CŨ: dùng TIÊU ĐỀ CỬA SỔ làm khoá. Nhưng mỗi bước (email→mật khẩu→2FA)
+        #    trang có tiêu đề KHÁC nhau ⇒ tưởng cửa sổ mới ⇒ Alt+T lại. Alt+T là BẬT/TẮT
+        #    nên: email MỞ → mật khẩu ĐÓNG (gõ trượt, timeout) → 2FA MỞ lại…
+        #    ⇒ Dùng khoá ỔN ĐỊNH theo profile (win_hint), panel side mở 1 lần là giữ nguyên.
+        _key = (win_hint or _wt or "default")[:60]
+        if _key not in _AT_PANEL_OPEN:
+            pyautogui.hotkey("alt", "t")
+            _t.sleep(2.0)
+            _AT_PANEL_OPEN.add(_key)
+            log_fn("  [AT] Mở side panel Auto Typer (Alt+T) — giữ mở suốt phiên")
+
+        # 4) Dán text vào ô nhập của Auto Typer
+        pyperclip.copy(text)
+        pyautogui.click(pos["input"][0], pos["input"][1])
+        _t.sleep(0.4)
+        pyautogui.hotkey("ctrl", "a")
+        pyautogui.hotkey("ctrl", "v")
+        _t.sleep(0.5)
+
+        # 5) Bấm START
+        pyautogui.click(pos["start"][0], pos["start"][1])
+        log_fn(f"  [AT] ▶ START — Auto Typer đang gõ ({len(text)} ký tự)…")
+
+        # 6) Chờ ô đích nhận đủ chữ (Auto Typer gõ chậm kiểu người thật, nhất là UNDETECTABLE).
+        #    Chờ theo ĐỘ DÀI text: ~4s/ký tự + 20s dư, tối thiểu bằng timeout_s.
+        _want = text.strip()
+        _wait_n = max(timeout_s, len(_want) * 4 + 20)
+        for _ in range(_wait_n):
+            await page.wait_for_timeout(1000)
+            try:
+                v = ((await locator.input_value()) or "").strip()
+            except Exception:
+                v = ""
+            if v == _want:
+                log_fn("  [AT] ✓ Auto Typer gõ xong.")
+                return True
+            # gõ dư/sai → dừng, để caller xử lý
+            if v and not _want.startswith(v) and len(v) >= len(_want):
+                log_fn(f"  [AT] ⚠ Nội dung không khớp ('{v[:20]}…') → dùng cách thường.")
+                return False
+        log_fn("  [AT] ⚠ Quá giờ chờ Auto Typer → dùng cách thường.")
+        return False
+    except Exception as e:
+        log_fn(f"  [AT] ⚠ Lỗi Auto Typer: {str(e)[:60]} → dùng cách thường.")
+        return False
+    finally:
+        try:
+            _AT_LOCK.release()
+        except Exception:
+            pass
+
+
+async def _human_type(locator, text: str, log_fn=print):
+    """GÕ NHƯ NGƯỜI THẬT vào ô `locator` (mặc định của tool).
+    - Delay NGẪU NHIÊN từng ký tự (không đều như máy).
+    - CHẬM lại ở ký tự khó (@ . _ - số, chữ HOA); thỉnh thoảng NGẬP NGỪNG lâu.
+    - Thỉnh thoảng GÕ SAI 1 ký tự rồi XOÁ sửa (như người thật).
+    Dùng cho email/mật khẩu/2FA/mail khôi phục và mọi ô nhập khác."""
+    if not text:
+        return
+    try:
+        await locator.click(timeout=5000)
+    except Exception:
+        pass
+    # xoá sạch ô trước khi gõ
+    try:
+        await locator.fill("")
+    except Exception:
+        try:
+            await locator.press("Control+a")
+            await locator.press("Delete")
+        except Exception:
+            pass
+
+    _HARD = set("@._-+0123456789")
+    for i, ch in enumerate(text):
+        # 1) thỉnh thoảng gõ sai rồi sửa (~4%/ký tự, không phải ký tự đầu/cuối)
+        if 0 < i < len(text) - 1 and random.random() < 0.04:
+            wrong = random.choice("abcdefghijklmnopqrstuvwxyz")
+            try:
+                await locator.press_sequentially(wrong, delay=0)
+                await asyncio.sleep(random.uniform(0.12, 0.35))
+                await locator.press("Backspace")
+                await asyncio.sleep(random.uniform(0.08, 0.20))
+            except Exception:
+                pass
+        # 2) gõ ký tự thật
+        try:
+            await locator.press_sequentially(ch, delay=0)
+        except Exception:
+            try:
+                await locator.type(ch)
+            except Exception:
+                pass
+        # 3) delay kiểu người: cơ bản 40–160ms, ký tự khó/hoa chậm hơn
+        d = random.uniform(0.04, 0.16)
+        if ch in _HARD or ch.isupper():
+            d += random.uniform(0.06, 0.18)
+        # 4) thỉnh thoảng ngập ngừng lâu (~7%)
+        if random.random() < 0.07:
+            d += random.uniform(0.30, 1.10)
+        await asyncio.sleep(d)
+
+
+async def _human_type_kb(page, text: str, log_fn=print):
+    """Gõ như người thật bằng BÀN PHÍM (khi không có locator, đã click ô sẵn)."""
+    if not text:
+        return
+    _HARD = set("@._-+0123456789")
+    for i, ch in enumerate(text):
+        if 0 < i < len(text) - 1 and random.random() < 0.04:
+            try:
+                await page.keyboard.type(random.choice("abcdefghijklmnopqrstuvwxyz"))
+                await asyncio.sleep(random.uniform(0.12, 0.35))
+                await page.keyboard.press("Backspace")
+                await asyncio.sleep(random.uniform(0.08, 0.20))
+            except Exception:
+                pass
+        try:
+            await page.keyboard.type(ch)
+        except Exception:
+            pass
+        d = random.uniform(0.04, 0.16)
+        if ch in _HARD or ch.isupper():
+            d += random.uniform(0.06, 0.18)
+        if random.random() < 0.07:
+            d += random.uniform(0.30, 1.10)
+        await asyncio.sleep(d)
 
 
 def gpm_start(pid):
@@ -362,7 +611,13 @@ async def _try_totp(page, secret: str, log_fn) -> bool:
             await inp.press("Delete")
         except Exception:
             pass
-    await inp.type(code, delay=90)   # gõ hiện chữ
+    # Gõ mã 2FA — Auto Typer nếu bật; không thì GÕ NHƯ NGƯỜI THẬT
+    _at_done = False
+    if AUTOTYPER_ON:
+        _at_done = await _autotyper_type(page, inp, code, log_fn, timeout_s=60,
+                                         win_hint=_at_hint())
+    if not _at_done:
+        await _human_type(inp, code, log_fn)
     await _click_next(page, "#totpNext")
     await page.wait_for_timeout(3500)
     return True
@@ -536,7 +791,15 @@ def _is_logged_in(url: str) -> bool:
 
 
 async def do_google_login(ws_url: str, email: str, password: str, recovery: str,
-                          totp_secret: str = "", log_fn=print):
+                          totp_secret: str = "", log_fn=print, win_hint: str = ""):
+    # Ghi nhớ cửa sổ của LUỒNG NÀY (tool đặt tên profile GPM = phần trước @ của email)
+    # → khi dùng Auto Typer sẽ focus đúng cửa sổ, chạy 2–3 luồng vẫn không nhầm.
+    try:
+        _AT_TL.hint = (win_hint or (email or "").split("@")[0] or "").strip()
+        # Mỗi account là 1 cửa sổ browser MỚI → panel chưa mở → xoá dấu để Alt+T mở lại.
+        _AT_PANEL_OPEN.discard((_AT_TL.hint or "default")[:60])
+    except Exception:
+        pass
 
     async with async_playwright() as p:
         log_fn("  Kết nối browser GPM...")
@@ -681,7 +944,12 @@ async def do_google_login(ws_url: str, email: str, password: str, recovery: str,
             except Exception:
                 pass
             log_fn(f"  → Đang gõ email: {email}")
-            await email_input.first.type(email, delay=150)   # 150ms/ký tự — thấy rõ từng chữ
+            _at_done = False
+            if AUTOTYPER_ON:
+                _at_done = await _autotyper_type(page, email_input.first, email, log_fn,
+                                                 win_hint=_at_hint())
+            if not _at_done:
+                await _human_type(email_input.first, email, log_fn)   # gõ như người thật
         typed_val = ""
         try:
             typed_val = await email_input.first.input_value()
@@ -803,7 +1071,12 @@ async def do_google_login(ws_url: str, email: str, password: str, recovery: str,
         await pass_input.first.click()
         await page.wait_for_timeout(400)
         log_fn(f"  → Đang gõ mật khẩu...")
-        await pass_input.first.type(password, delay=100)   # 100ms/ký tự
+        _at_done = False
+        if AUTOTYPER_ON:
+            _at_done = await _autotyper_type(page, pass_input.first, password, log_fn,
+                                             win_hint=_at_hint())
+        if not _at_done:
+            await _human_type(pass_input.first, password, log_fn)   # gõ như người thật
         await page.wait_for_timeout(600)
         # Bấm nút mật khẩu (không dùng keyboard)
         await _click_next(page, "#passwordNext")
@@ -1067,7 +1340,7 @@ async def do_google_login(ws_url: str, email: str, password: str, recovery: str,
                                     await el.fill("")
                                 except Exception:
                                     await el.triple_click()
-                                await el.press_sequentially(recovery, delay=40)
+                                await _human_type(el, recovery, log_fn)   # gõ như người thật
                                 await page.wait_for_timeout(500)
                                 await _click_next(page)
                                 await page.wait_for_timeout(3000)
@@ -1095,7 +1368,7 @@ async def do_google_login(ws_url: str, email: str, password: str, recovery: str,
                                 await el.fill("")
                             except Exception:
                                 await el.triple_click()
-                            await el.press_sequentially(recovery, delay=40)
+                            await _human_type(el, recovery, log_fn)   # gõ như người thật
                             await page.wait_for_timeout(500)
                             await _click_next(page)
                             await page.wait_for_timeout(3000)
@@ -2018,7 +2291,7 @@ async def _handle_challenge_selection(page, password: str, recovery_email: str, 
                 await inp.first.click()
                 await page.wait_for_timeout(300)
                 await inp.first.triple_click()
-                await inp.first.press_sequentially(recovery_email, delay=40)
+                await _human_type(inp.first, recovery_email, log_fn)   # gõ như người thật
                 await page.wait_for_timeout(500)
                 log_fn(f"  ↩ Đã nhập recovery email (input page): {recovery_email}")
                 await _click_next(page)
@@ -2053,7 +2326,7 @@ async def _handle_challenge_selection(page, password: str, recovery_email: str, 
                         await inp2.first.click()
                         await page.wait_for_timeout(300)
                         await inp2.first.triple_click()
-                        await inp2.first.press_sequentially(recovery_email, delay=40)
+                        await _human_type(inp2.first, recovery_email, log_fn)   # gõ như người thật
                         await page.wait_for_timeout(500)
                         await _click_next(page)
                         await page.wait_for_timeout(3000)
@@ -2110,7 +2383,7 @@ async def _handle_challenge_selection(page, password: str, recovery_email: str, 
                         if await inp2.count() > 0 and await inp2.first.is_visible():
                             await inp2.first.click()
                             await page.wait_for_timeout(300)
-                            await inp2.first.press_sequentially(recovery_email, delay=40)
+                            await _human_type(inp2.first, recovery_email, log_fn)   # gõ như người thật
                             await page.wait_for_timeout(500)
                             await _click_next(page)
                             await page.wait_for_timeout(3000)
@@ -4730,7 +5003,7 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                                         await el.fill("")
                                     except Exception:
                                         pass
-                                    await el.type(_cname, delay=30)
+                                    await _human_type(el, _cname, log_fn)   # gõ như người thật
                                     await page.wait_for_timeout(400)
                                     # XÁC MINH đã vào đúng ô (ô Name phải có giá trị)
                                     try:
@@ -5369,7 +5642,7 @@ async def do_add_brand_admin(ws_url: str, email: str = "", password: str = "",
                 try:
                     await page.mouse.click(_box["x"], _box["y"])
                     await page.wait_for_timeout(400)
-                    await page.keyboard.type(owner_email, delay=25)
+                    await _human_type_kb(page, owner_email, log_fn)   # gõ như người thật
                     await page.wait_for_timeout(1500)
                 except Exception:
                     pass
