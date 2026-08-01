@@ -1,5 +1,5 @@
 {
-  "version": "2026.07.29-e",
-  "note": "Them 'Go nhu nguoi that' (mac dinh toan tool: email/pass/2FA/mail khoi phuc). Auto Typer (tuy chon) qua tien ich trong GPM; canh bao ro khi doi man hinh/thieu thu vien. Sua tao kenh thuong hieu.",
+  "version": "2026.07.31-g",
+  "note": "Sua loi Auto Typer danh email vao o mat khau: bo qua diem CLEAR trung START, tu xoa cache .pyc khi khoi dong, chi bao cap nhat khi GitHub moi hon, xac minh o email/mat khau dung truoc khi bam tiep, dung Auto Typer (Alt+S) khi go sai. Them dieu khien qua DOM/CDP (uu tien).",
   "files": ["auto_login_tool.py", "kiot_login_tool.py"]
 }

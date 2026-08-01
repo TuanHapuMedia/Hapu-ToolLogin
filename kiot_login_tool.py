@@ -89,6 +89,16 @@ for _s in (sys.stdout, sys.stderr):
 
 import requests
 
+# ⚠ XOÁ CACHE .pyc CŨ trước khi import — tránh Python dùng bytecode cũ khi file .py mới
+#    có mốc thời gian cũ hơn (từng làm mọi bản sửa 'không có tác dụng').
+try:
+    import shutil as _shutil
+    _pc = Path(__file__).parent / "__pycache__"
+    if _pc.exists():
+        _shutil.rmtree(_pc, ignore_errors=True)
+except Exception:
+    pass
+
 # Tái sử dụng logic đăng nhập + helper GPM đã có sẵn
 from auto_login_tool import (do_google_login, do_create_2fa, do_change_2fa,
                              do_channel, do_change_banner, do_leave_admin,
@@ -106,7 +116,7 @@ except Exception:
 #  PHIÊN BẢN TOOL — MỖI LẦN SỬA CODE, ĐỔI SỐ NÀY (ngày + số thứ tự trong ngày).
 #  Hiện ở tiêu đề cửa sổ + header để mỗi máy biết đang chạy bản nào.
 # ══════════════════════════════════════════════════════════════════════════
-APP_VERSION = "2026.07.29-e"
+APP_VERSION = "2026.07.31-g"
 
 # ══════════════════════════════════════════════════════════════════════════
 #  TỰ ĐỘNG CẬP NHẬT (qua GitHub) — mỗi máy khi mở tool sẽ hỏi version.json trên
@@ -291,7 +301,9 @@ class KiotLoginApp:
                     return
                 info = r.json()
                 latest = str(info.get("version", "")).strip()
-                if latest and latest != APP_VERSION:
+                # CHỈ báo khi GitHub MỚI HƠN (tránh bấm nhầm tải bản CŨ đè lên bản mới).
+                # So sánh chuỗi ngày "2026.07.31-c" > "2026.07.29-e" là đúng thứ tự.
+                if latest and latest > APP_VERSION:
                     self._update_info = info
                     self.root.after(0, self._show_update_banner)
             except Exception:
@@ -2202,6 +2214,7 @@ class KiotLoginApp:
                             ws_url, email, acc["password"], acc["recovery"],
                             totp_secret=acc.get("totp", ""),
                             log_fn=lambda m: self._log(f"{tag}{m}", "muted"),
+                            win_hint=profile_name or "",   # tên profile để Auto Typer focus ĐÚNG cửa sổ
                         ), timeout=300)
                     err_str = "" if success else str(result)
                 except asyncio.TimeoutError:

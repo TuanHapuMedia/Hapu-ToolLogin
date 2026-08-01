@@ -141,10 +141,47 @@ def _at_pos() -> dict:
     return {}
 
 
+def _force_foreground(hwnd) -> bool:
+    """ÉP cửa sổ (hwnd) lên trước bằng Windows API + XÁC MINH nó thật sự ở trước.
+    Trả True nếu cửa sổ đích đang là foreground (chắc chắn click sẽ trúng nó)."""
+    try:
+        import ctypes
+        import time as _t
+        u = ctypes.windll.user32
+        SW_RESTORE, SW_MAXIMIZE = 9, 3
+        # đưa ra khỏi minimize + phóng to
+        u.ShowWindow(hwnd, SW_RESTORE)
+        u.ShowWindow(hwnd, SW_MAXIMIZE)
+        # mẹo vượt hạn chế SetForegroundWindow của Windows: gắn luồng input
+        fg = u.GetForegroundWindow()
+        cur_tid = u.GetWindowThreadProcessId(fg, None)
+        tgt_tid = u.GetWindowThreadProcessId(hwnd, None)
+        try:
+            u.AttachThreadInput(cur_tid, tgt_tid, True)
+        except Exception:
+            pass
+        for _ in range(3):
+            u.BringWindowToTop(hwnd)
+            u.SetForegroundWindow(hwnd)
+            u.SetActiveWindow(hwnd)
+            _t.sleep(0.25)
+            if u.GetForegroundWindow() == hwnd:
+                break
+        try:
+            u.AttachThreadInput(cur_tid, tgt_tid, False)
+        except Exception:
+            pass
+        _t.sleep(0.35)
+        return u.GetForegroundWindow() == hwnd
+    except Exception:
+        return False
+
+
 def _at_focus_window(win_hint: str = "") -> str:
-    """Đưa ĐÚNG cửa sổ trình duyệt lên trước + phóng to.
-    `win_hint` = tên/ID profile (để chạy nhiều luồng vẫn chọn đúng cửa sổ của luồng mình).
-    Trả về tiêu đề cửa sổ đã focus ('' nếu không thấy)."""
+    """Đưa ĐÚNG cửa sổ trình duyệt lên trước + phóng to + XÁC MINH ở foreground.
+    `win_hint` = tên/ID profile (chạy nhiều luồng vẫn chọn đúng cửa sổ của luồng mình).
+    Trả về tiêu đề cửa sổ nếu ĐÃ ở foreground; '' nếu không tìm thấy hoặc KHÔNG ép được lên trước
+    (caller sẽ gõ như người thật để tránh click nhầm sang cửa sổ khác)."""
     try:
         import pygetwindow as gw
         import time as _t
@@ -166,6 +203,22 @@ def _at_focus_window(win_hint: str = "") -> str:
                     break
         if pick is None:
             return ""
+        # ÉP lên trước bằng Windows API + xác minh foreground (chống 3 cửa sổ chồng nhau)
+        _hwnd = getattr(pick, "_hWnd", None)
+        if _hwnd:
+            if _force_foreground(_hwnd):
+                return pick.title or ""
+            # thử lại 1 lần nữa sau khi phóng to bằng pygetwindow
+            try:
+                if pick.isMinimized:
+                    pick.restore()
+                pick.maximize()
+            except Exception:
+                pass
+            if _force_foreground(_hwnd):
+                return pick.title or ""
+            return ""    # KHÔNG ép được lên trước → báo hỏng để gõ người thật
+        # không lấy được hwnd → dùng cách cũ (kém chắc)
         if pick.isMinimized:
             pick.restore()
         try:
@@ -179,19 +232,133 @@ def _at_focus_window(win_hint: str = "") -> str:
         return ""
 
 
+_AT_EXT_ID = "bgpnjdahpmkaflfpbkdplndklnmghklp"   # Auto Typer extension id
+
+
+async def _autotyper_find_panel(page):
+    """Tìm TRANG side panel của Auto Typer trong CHÍNH browser của luồng này (qua DOM).
+    Trả về Playwright page của panel, hoặc None."""
+    try:
+        br = page.context.browser
+        ctxs = list(br.contexts) if br else [page.context]
+        for ctx in ctxs:
+            for pg in list(ctx.pages):
+                u = (pg.url or "")
+                if _AT_EXT_ID in u and ("index.html" in u or "popup" in u or u.endswith(".html")):
+                    return pg
+    except Exception:
+        pass
+    return None
+
+
+async def _autotyper_cdp_diag(page, log_fn):
+    """CHẨN ĐOÁN: liệt kê mọi target của Auto Typer qua CDP (kể cả side panel không nằm
+    trong context.pages). Giúp biết panel có phải target điều khiển được hay không."""
+    if getattr(_AT_TL, "dbg_cdp", False):
+        return
+    _AT_TL.dbg_cdp = True
+    try:
+        sess = await page.context.new_cdp_session(page)
+        tinfo = await sess.send("Target.getTargets")
+        _urls = [(t.get("type", ""), (t.get("url", "") or "")[:55])
+                 for t in (tinfo.get("targetInfos") or [])
+                 if _AT_EXT_ID in (t.get("url", "") or "")]
+        log_fn(f"  [AT-CDP] Target của Auto Typer: {_urls or '(không có)'}")
+    except Exception as e:
+        log_fn(f"  [AT-CDP] Không đọc được target: {str(e)[:50]}")
+
+
+async def _autotyper_dom_type(page, locator, text: str, log_fn, timeout_s: int) -> bool:
+    """CÁCH CHẮC CHẮN: điều khiển Auto Typer QUA DOM (không dùng chuột/toạ độ).
+    Điền thẳng vào ô textarea của panel + bấm START bằng DOM → không lo focus/cửa sổ/clipboard.
+    Trả True nếu ô ĐÍCH nhận đủ chữ; False nếu không truy cập được panel (để dùng cách chuột)."""
+    panel = await _autotyper_find_panel(page)
+    if panel is None:
+        return False
+    try:
+        ta = panel.locator("textarea")
+        if await ta.count() == 0:
+            return False
+        # điền thẳng text vào ô (thay sạch nội dung cũ) + XÁC MINH
+        await ta.first.fill("")
+        await ta.first.fill(text)
+        _v = ((await ta.first.input_value()) or "").strip()
+        if _v != text.strip():
+            log_fn("  [AT-DOM] ⚠ Điền ô panel chưa khớp → thử cách chuột.")
+            return False
+        # bấm START (nhiều biến thể chữ)
+        _clicked = False
+        for _w in ["START", "Start", "start"]:
+            b = panel.locator(f'button:has-text("{_w}")')
+            if await b.count() > 0 and await b.first.is_visible():
+                await b.first.click(timeout=4000)
+                _clicked = True
+                break
+        if not _clicked:
+            return False
+        log_fn(f"  [AT-DOM] ▶ START (điều khiển qua DOM) — gõ {len(text)} ký tự…")
+        # chờ ô đích nhận đủ chữ
+        _want = text.strip()
+        _wait_n = max(timeout_s, len(_want) * 4 + 20)
+        for _ in range(_wait_n):
+            await page.wait_for_timeout(1000)
+            try:
+                v = ((await locator.input_value()) or "").strip()
+            except Exception:
+                v = ""
+            if v == _want:
+                log_fn("  [AT-DOM] ✓ Gõ xong.")
+                return True
+            if v and not _want.startswith(v) and len(v) >= len(_want):
+                log_fn(f"  [AT-DOM] ⚠ Không khớp ('{v[:20]}…') → cách thường.")
+                return False
+        log_fn("  [AT-DOM] ⚠ Quá giờ chờ → cách thường.")
+        return False
+    except Exception as e:
+        log_fn(f"  [AT-DOM] ⚠ Lỗi: {str(e)[:50]} → thử cách chuột.")
+        return False
+
+
 async def _autotyper_type(page, locator, text: str, log_fn=print,
                           timeout_s: int = 90, win_hint: str = "") -> bool:
     """Gõ `text` vào ô `locator` BẰNG EXTENSION AUTO TYPER.
-    `win_hint`: tên/ID profile → focus ĐÚNG cửa sổ của luồng này (chạy nhiều luồng vẫn đúng).
-    ⚠ Chiếm chuột/bàn phím ⇒ có KHOÁ: các luồng gõ LẦN LƯỢT, không tranh nhau.
+    ƯU TIÊN điều khiển QUA DOM (chắc chắn, chạy nhiều luồng vẫn đúng);
+    nếu không truy cập được panel thì dùng chuột/toạ độ (có khoá lượt).
     Trả True nếu ô đích nhận đủ chữ; False nếu hỏng (caller gõ theo cách thường)."""
     if not text:
         return False
+
+    # ── CÁCH 1: QUA DOM (không cần toạ độ, không tranh chuột giữa các luồng) ──
+    try:
+        _panel = await _autotyper_find_panel(page)
+        if _panel is None:
+            # chẩn đoán: liệt kê trang qua DOM + target qua CDP (1 lần/luồng)
+            if not getattr(_AT_TL, "dbg_pages", False):
+                _AT_TL.dbg_pages = True
+                try:
+                    br = page.context.browser
+                    _urls = []
+                    for ctx in (list(br.contexts) if br else [page.context]):
+                        for pg in list(ctx.pages):
+                            _urls.append((pg.url or "")[:60])
+                    log_fn(f"  [AT-DOM] Không thấy panel qua DOM. Trang đang mở: {_urls}")
+                except Exception:
+                    pass
+                await _autotyper_cdp_diag(page, log_fn)
+        else:
+            if await _autotyper_dom_type(page, locator, text, log_fn, timeout_s):
+                return True
+    except Exception:
+        pass
+
     pos = _at_pos()
     if not pos:
         log_fn("  [AT] ⚠ Chưa căn chỉnh toạ độ Auto Typer → gõ theo cách thường. "
                "(chạy CHAY_TEST_AUTOTYPER.bat để căn chỉnh)")
         return False
+    if not pos.get("clear"):
+        log_fn("  [AT] ⚠ File toạ độ CHƯA CÓ nút CLEAR → dễ chèn nhầm giữa chuỗi. "
+               "Nên chạy lại CHAY_TEST_AUTOTYPER.bat để căn thêm nút CLEAR.")
     try:
         import pyautogui
         import pyperclip
@@ -199,6 +366,28 @@ async def _autotyper_type(page, locator, text: str, log_fn=print,
     except Exception:
         log_fn("  [AT] ⚠ Thiếu pyautogui/pyperclip → gõ theo cách thường.")
         return False
+
+    # Cấu hình pyautogui chống lỗi khi chạy nhiều luồng / máy tải nặng.
+    try:
+        pyautogui.FAILSAFE = False
+        pyautogui.PAUSE = 0.12          # nghỉ giữa các thao tác (tránh dồn quá nhanh)
+    except Exception:
+        pass
+
+    def _click_no_drag(x, y):
+        """Click GỌN, KHÔNG kéo rê (tránh bôi đen chữ khi 3 luồng máy nặng).
+        Di chuột tới NƠI → DỪNG HẲN → nhấn xuống → nhả — không di trong lúc giữ nút."""
+        try:
+            pyautogui.moveTo(x, y, duration=0.18)   # di có thời gian để chuột ổn định
+            _t.sleep(0.12)
+            pyautogui.moveTo(x, y)                  # chốt đúng điểm lần nữa
+            _t.sleep(0.08)
+            pyautogui.mouseDown()                   # nhấn tại chỗ
+            _t.sleep(0.06)
+            pyautogui.mouseUp()                     # nhả tại chỗ (không di giữa 2 bước)
+            _t.sleep(0.15)
+        except Exception:
+            pass
 
     # ── CHỜ TỚI LƯỢT dùng chuột (không chặn luồng khác chạy việc của nó) ──
     _waited = 0
@@ -236,22 +425,71 @@ async def _autotyper_type(page, locator, text: str, log_fn=print,
             _AT_PANEL_OPEN.add(_key)
             log_fn("  [AT] Mở side panel Auto Typer (Alt+T) — giữ mở suốt phiên")
 
-        # 4) Dán text vào ô nhập của Auto Typer
-        pyperclip.copy(text)
-        pyautogui.click(pos["input"][0], pos["input"][1])
-        _t.sleep(0.4)
+        # 4) XOÁ SẠCH ô cũ rồi mới dán — NHIỀU LỚP để không bị chèn giữa chuỗi.
+        # ⚠⚠ LỖI CŨ: click rơi vào GIỮA chữ email cũ + ô chưa xoá ⇒ mật khẩu bị chèn
+        #    vào giữa email ('phamthi' + '$MayK34…' + '@gmail.com'). Triple-click chỉ
+        #    chọn 1 TỪ nên không xoá hết. ⇒ Làm ĐỦ 3 lớp:
+        #      (a) bấm nút CLEAR của Auto Typer (nếu đã căn toạ độ) — xoá bằng app,
+        #      (b) focus ô nhập rồi Ctrl+A + Delete — chọn & xoá sạch trong ô,
+        #      (c) mới dán.
+        # ⚠⚠ COPY CÓ KIỂM TRA: nếu pyperclip.copy lỗi thầm lặng (hay gặp khi nhiều luồng /
+        #    clipboard bận), clipboard giữ CHUỖI CŨ (email) ⇒ bước mật khẩu lại dán EMAIL.
+        #    ⇒ Copy rồi ĐỌC LẠI, khớp mới đi tiếp; không khớp thì copy lại (tối đa 6 lần).
+        _clip_ok = False
+        for _ci in range(6):
+            try:
+                pyperclip.copy(text)
+                _t.sleep(0.18)
+                if (pyperclip.paste() or "") == text:
+                    _clip_ok = True
+                    break
+            except Exception:
+                _t.sleep(0.20)
+        if not _clip_ok:
+            log_fn("  [AT] ⚠ Clipboard không nhận đúng chuỗi → gõ theo cách thường (tránh dán nhầm).")
+            return False
+        # (a) CLEAR bằng nút của Auto Typer — CHỈ dùng khi toạ độ CLEAR KHÁC START.
+        #     ⚠⚠ LỖI ĐÃ GẶP: file toạ độ có CLEAR TRÙNG START → 'bấm CLEAR' hoá ra bấm START
+        #        → chạy gõ lại EMAIL cũ, ô mật khẩu nhận email. ⇒ Bỏ qua nếu trùng.
+        _clr = pos.get("clear")
+        _st = pos.get("start")
+        _clr_ok = bool(_clr and _st and (abs(_clr[0] - _st[0]) + abs(_clr[1] - _st[1]) > 25))
+        if _clr and not _clr_ok:
+            log_fn("  [AT] ⚠ Toạ độ CLEAR trùng START → BỎ QUA nút CLEAR (căn lại cho đúng). "
+                   "Dùng Ctrl+A+Delete để xoá ô.")
+        if _clr_ok:
+            _click_no_drag(_clr[0], _clr[1])
+            _t.sleep(0.35)
+        # (b) focus ô nhập → chọn hết → xoá sạch. Click 2 LẦN cho chắc focus vào ô,
+        #     rồi Ctrl+A phải nằm TRONG ô (không lan ra trang).
+        _click_no_drag(pos["input"][0], pos["input"][1])
+        _t.sleep(0.20)
+        _click_no_drag(pos["input"][0], pos["input"][1])
+        _t.sleep(0.25)
         pyautogui.hotkey("ctrl", "a")
+        _t.sleep(0.18)
+        pyautogui.press("delete")
+        _t.sleep(0.18)
+        # (c) dán vào ô đã trống
         pyautogui.hotkey("ctrl", "v")
         _t.sleep(0.5)
 
-        # 5) Bấm START
-        pyautogui.click(pos["start"][0], pos["start"][1])
+        # 5) Bấm START (click GỌN, không kéo rê)
+        _click_no_drag(pos["start"][0], pos["start"][1])
         log_fn(f"  [AT] ▶ START — Auto Typer đang gõ ({len(text)} ký tự)…")
 
         # 6) Chờ ô đích nhận đủ chữ (Auto Typer gõ chậm kiểu người thật, nhất là UNDETECTABLE).
         #    Chờ theo ĐỘ DÀI text: ~4s/ký tự + 20s dư, tối thiểu bằng timeout_s.
         _want = text.strip()
         _wait_n = max(timeout_s, len(_want) * 4 + 20)
+        def _stop_autotyper_and_clear():
+            """DỪNG Auto Typer (Alt+S) + XOÁ ô đích, tránh nó gõ nền tiếp làm lẫn chuỗi."""
+            try:
+                pyautogui.hotkey("alt", "s")   # emergency-stop của Auto Typer
+                _t.sleep(0.4)
+            except Exception:
+                pass
+
         for _ in range(_wait_n):
             await page.wait_for_timeout(1000)
             try:
@@ -261,11 +499,17 @@ async def _autotyper_type(page, locator, text: str, log_fn=print,
             if v == _want:
                 log_fn("  [AT] ✓ Auto Typer gõ xong.")
                 return True
-            # gõ dư/sai → dừng, để caller xử lý
+            # gõ dư/sai → DỪNG Auto Typer ngay rồi để caller gõ tay (tránh gõ nền tiếp)
             if v and not _want.startswith(v) and len(v) >= len(_want):
-                log_fn(f"  [AT] ⚠ Nội dung không khớp ('{v[:20]}…') → dùng cách thường.")
+                log_fn(f"  [AT] ⚠ Nội dung không khớp ('{v[:20]}…') → DỪNG + gõ cách thường.")
+                _stop_autotyper_and_clear()
+                try:
+                    await locator.fill("")
+                except Exception:
+                    pass
                 return False
-        log_fn("  [AT] ⚠ Quá giờ chờ Auto Typer → dùng cách thường.")
+        log_fn("  [AT] ⚠ Quá giờ chờ Auto Typer → DỪNG + gõ cách thường.")
+        _stop_autotyper_and_clear()
         return False
     except Exception as e:
         log_fn(f"  [AT] ⚠ Lỗi Auto Typer: {str(e)[:60]} → dùng cách thường.")
@@ -956,6 +1200,11 @@ async def do_google_login(ws_url: str, email: str, password: str, recovery: str,
         except Exception:
             pass
         log_fn(f"  ✓ Đã gõ email (ô hiện: '{typed_val[:40]}')")
+        # ⚠ LỚP AN TOÀN: ô email phải ĐÚNG bằng email trước khi bấm Tiếp theo.
+        if typed_val.strip().lower() != email.strip().lower():
+            log_fn(f"  ⚠ Ô email SAI ('{typed_val[:20]}…') → gõ lại như người thật.")
+            await _human_type(email_input.first, email, log_fn)
+            await page.wait_for_timeout(400)
         await page.wait_for_timeout(600)
         # Bấm nút "Tiếp theo / Next" (không dùng keyboard để tránh crash)
         await _click_next(page, "#identifierNext")
@@ -1078,6 +1327,22 @@ async def do_google_login(ws_url: str, email: str, password: str, recovery: str,
         if not _at_done:
             await _human_type(pass_input.first, password, log_fn)   # gõ như người thật
         await page.wait_for_timeout(600)
+        # ⚠ LỚP AN TOÀN CUỐI: XÁC MINH ô mật khẩu ĐÚNG bằng password trước khi bấm Tiếp theo.
+        #    (chống mọi trường hợp Auto Typer gõ nhầm email vào ô mật khẩu.)
+        try:
+            _pv = (await pass_input.first.input_value()) or ""
+        except Exception:
+            _pv = ""
+        if _pv != password:
+            log_fn(f"  ⚠ Ô mật khẩu SAI ('{_pv[:6]}…' ≠ mật khẩu) → gõ lại như người thật.")
+            await _human_type(pass_input.first, password, log_fn)
+            await page.wait_for_timeout(400)
+            try:
+                _pv2 = (await pass_input.first.input_value()) or ""
+            except Exception:
+                _pv2 = ""
+            if _pv2 != password:
+                return False, "KHÔNG NHẬP ĐÚNG MẬT KHẨU (ô mật khẩu không khớp sau khi thử lại)", None
         # Bấm nút mật khẩu (không dùng keyboard)
         await _click_next(page, "#passwordNext")
         await page.wait_for_timeout(5000)
